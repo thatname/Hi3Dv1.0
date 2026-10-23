@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-inference-steps", type=int, default=25)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--decode-device",
+        help="Optional second GPU for VAE decoding, mesh extraction, and "
+        "revoxelization, e.g. cuda:1. Defaults to --device.",
+    )
     parser.add_argument("--sequential-cpu-offload", action="store_true")
     parser.add_argument("--remove-background", action="store_true")
     parser.add_argument("--revision")
@@ -68,7 +73,7 @@ def main() -> int:
     if args.sequential_cpu_offload:
         pipeline.enable_sequential_cpu_offload(args.device)
     else:
-        pipeline.to(args.device)
+        pipeline.to(args.device, decode_device=args.decode_device)
     result = pipeline(
         image,
         coarse_mesh,
