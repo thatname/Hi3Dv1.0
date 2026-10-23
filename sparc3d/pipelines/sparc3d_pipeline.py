@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable
 from numbers import Integral
@@ -85,6 +86,7 @@ class Sparc3DPipeline:
         self._transformer_1024_loader = transformer_1024_loader
         self.progress_callback = progress_callback
         self._device = torch.device("cpu")
+        self._decode_device = torch.device("cpu")
         self._sequential_cpu_offload = False
 
     @classmethod
@@ -168,11 +170,24 @@ class Sparc3DPipeline:
         """Return the execution device selected with :meth:`to`."""
         return self._device
 
-    def to(self, device: str | torch.device) -> "Sparc3DPipeline":
+    @property
+    def decode_device(self) -> torch.device:
+        """Return the device running VAE decoding, extraction, and revoxelization."""
+        return self._decode_device
+
+    def to(
+        self,
+        device: str | torch.device,
+        decode_device: str | torch.device | None = None,
+    ) -> "Sparc3DPipeline":
         """Move materialized components to ``device`` without changing dtype.
 
         Args:
-            device: Execution device accepted by ``torch.device``.
+            device: Execution device accepted by ``torch.device``, used by the
+                conditioner and both transformers.
+            decode_device: Optional second device for the VAE decoder, mesh
+                extraction, and revoxelization, whose memory peaks at high
+                resolution. Defaults to ``device``.
 
         Returns:
             This pipeline.
@@ -183,12 +198,14 @@ class Sparc3DPipeline:
         if self._sequential_cpu_offload:
             raise RuntimeError("cannot call to() after enabling sequential CPU offload")
         target = torch.device(device)
+        decode_target = target if decode_device is None else torch.device(decode_device)
         self.transformer_512.to(target)
-        self.vae.to(target)
+        self.vae.to(decode_target)
         self.conditioner.to(target)
         if self._transformer_1024 is not None:
             self._transformer_1024.to(target)
         self._device = target
+        self._decode_device = decode_target
         return self
 
     def enable_sequential_cpu_offload(
@@ -236,6 +253,7 @@ class Sparc3DPipeline:
                 offload_buffers=True,
             )
         self._device = execution_device
+        self._decode_device = execution_device
         self._sequential_cpu_offload = True
         return self
 
@@ -271,7 +289,8 @@ class Sparc3DPipeline:
 
         prepared = prepare_image(image)
         mesh = validate_mesh(coarse_mesh)
-        condition = self.conditioner(prepared).to(self._device)
+        with self._on(self._device):
+            condition = self.conditioner(prepared).to(self._device)
         coords = self._adaptive_voxelize(mesh, 64, PASS_BUDGETS[0])
         return self._run_refinement(
             condition,
@@ -315,7 +334,8 @@ class Sparc3DPipeline:
         from sparc3d.utils.image import prepare_image
 
         prepared = prepare_image(image)
-        condition = self.conditioner(prepared).to(self._device)
+        with self._on(self._device):
+            condition = self.conditioner(prepared).to(self._device)
         return self._run_refinement(
             condition,
             coords,
@@ -346,25 +366,28 @@ class Sparc3DPipeline:
             transformer = (
                 self.transformer_512 if structure == 64 else self.transformer_1024
             )
-            latents = self._sample_latents(
-                transformer,
-                condition,
-                coords,
-                structure,
-                num_inference_steps,
-                generator,
-                pass_index=call_pass_index,
-                num_passes=len(pass_indices),
-            )
-            decoded = self._decode_latents(latents, structure)
-            has_another_pass = ladder_index < target_index
-            decoded_features = self._decoded_feature_count(decoded)
-            if has_another_pass and decoded_features > DECODE_FEATURE_CEILING:
-                raise RuntimeError(
-                    "decoded feature ceiling exceeded before another pass: "
-                    f"{decoded_features} > {DECODE_FEATURE_CEILING}"
+            with self._on(self._device):
+                latents = self._sample_latents(
+                    transformer,
+                    condition,
+                    coords,
+                    structure,
+                    num_inference_steps,
+                    generator,
+                    pass_index=call_pass_index,
+                    num_passes=len(pass_indices),
                 )
-            mesh = self._extract_mesh(decoded)
+            with self._on(self._decode_device):
+                decoded = self._decode_latents(latents, structure)
+                has_another_pass = ladder_index < target_index
+                decoded_features = self._decoded_feature_count(decoded)
+                if has_another_pass and decoded_features > DECODE_FEATURE_CEILING:
+                    raise RuntimeError(
+                        "decoded feature ceiling exceeded before another pass: "
+                        f"{decoded_features} > {DECODE_FEATURE_CEILING}"
+                    )
+                mesh = self._extract_mesh(decoded)
+                del decoded
 
             if has_another_pass:
                 next_index = ladder_index + 1
@@ -470,10 +493,10 @@ class Sparc3DPipeline:
         return apply_effective_guidance(positive.feats, negative.feats, timestep)
 
     def _decode_latents(self, latents: Any, structure_resolution: int) -> Any:
-        grid_coord = latents.coords[:, 1:].int()
+        grid_coord = latents.coords[:, 1:].int().to(self._decode_device)
         mapping = {
             "grid_coord": grid_coord,
-            "feat": latents.feats.float(),
+            "feat": latents.feats.float().to(self._decode_device),
             "sdf": None,
             "deform": None,
             "resolution": structure_resolution,
@@ -482,8 +505,8 @@ class Sparc3DPipeline:
             ),
         }
         with torch.autocast(
-            device_type=self._device.type,
-            enabled=self._device.type == "cuda",
+            device_type=self._decode_device.type,
+            enabled=self._decode_device.type == "cuda",
         ):
             return self.vae.decode(mapping)
 
@@ -513,12 +536,20 @@ class Sparc3DPipeline:
     ) -> torch.Tensor:
         from sparc3d.ops import adaptive_vox
 
-        return adaptive_vox(
-            mesh,
-            resolution=structure_resolution,
-            target_num=token_budget,
-            device=self._device,
-        )
+        with self._on(self._decode_device):
+            return adaptive_vox(
+                mesh,
+                resolution=structure_resolution,
+                target_num=token_budget,
+                device=self._decode_device,
+            )
+
+    @staticmethod
+    def _on(device: torch.device) -> contextlib.AbstractContextManager:
+        """Make ``device`` current, as spconv and Triton launch on the current device."""
+        if device.type == "cuda":
+            return torch.cuda.device(device)
+        return contextlib.nullcontext()
 
     def _postprocess_mesh(self, mesh: Any, *, target_face_count: int) -> Any:
         from sparc3d.sparcubes.postprocess import postprocess_mesh

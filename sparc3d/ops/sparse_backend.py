@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from math import prod
 from typing import Any, Optional, Tuple
 
@@ -16,9 +18,34 @@ _SPCONV_INT32_BYTE_LIMIT = 2**31 - 1
 
 _spconv_conv_class: Optional[type] = None
 
+_cuda12_dll_directory_checked = False
+
+
+def _add_windows_cuda12_dll_directory() -> None:
+    """Expose a CUDA 12 toolkit's DLLs to the Windows ``spconv-cu12x`` wheels, once.
+
+    Those wheels link ``cudart64_12.dll``, but cumm only searches ``CUDA_PATH``,
+    which names the newest installed toolkit (e.g. 13.x) when several coexist.
+    Windows installers also record each toolkit as ``CUDA_PATH_V12_<minor>``.
+    Each ``os.add_dll_directory`` call appends to the process search path, which
+    overflows (WinError 206) if repeated per sparse tensor.
+    """
+    global _cuda12_dll_directory_checked
+    if os.name != "nt" or _cuda12_dll_directory_checked:
+        return
+    _cuda12_dll_directory_checked = True
+    candidates = []
+    for name, value in os.environ.items():
+        match = re.fullmatch(r"CUDA_PATH_V12_(\d+)", name.upper())
+        if match and os.path.isdir(os.path.join(value, "bin")):
+            candidates.append((int(match.group(1)), os.path.join(value, "bin")))
+    if candidates:
+        os.add_dll_directory(max(candidates)[1])
+
 
 def _spconv():
     """Import spconv's PyTorch namespace, with an actionable error if it is absent."""
+    _add_windows_cuda12_dll_directory()
     try:
         import spconv.pytorch as spconv
     except ImportError as error:
