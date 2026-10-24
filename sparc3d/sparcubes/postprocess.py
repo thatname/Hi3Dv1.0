@@ -5,6 +5,7 @@ from __future__ import annotations
 from numbers import Integral
 
 import numpy as np
+import torch
 import trimesh
 
 COMPONENT_FACE_RATIO = 0.005
@@ -68,16 +69,19 @@ def validate_mesh(mesh: trimesh.Trimesh | trimesh.Scene) -> trimesh.Trimesh:
 def postprocess_mesh(
     mesh: trimesh.Trimesh | trimesh.Scene,
     *,
-    target_face_count: int,
+    target_face_count: int | None,
     component_face_ratio: float = COMPONENT_FACE_RATIO,
+    device: torch.device | str | None = None,
 ) -> trimesh.Trimesh:
     """Filter, simplify, center, and unit-scale mesh geometry.
 
     Args:
         mesh: Triangle mesh or transformed scene to process.
-        target_face_count: Caller-selected pyfqmr face target.
+        target_face_count: Caller-selected pyfqmr face target, or ``None`` to keep
+            every extracted face.
         component_face_ratio: Minimum total-face ratio retained for components
             other than the largest.
+        device: Optional device for sorting edges while finding components.
 
     Returns:
         Material-free mesh centered by vertex mean with unit maximum radial norm.
@@ -85,7 +89,7 @@ def postprocess_mesh(
     Raises:
         ValueError: A parameter or intermediate mesh is invalid.
     """
-    if (
+    if target_face_count is not None and (
         isinstance(target_face_count, bool)
         or not isinstance(target_face_count, Integral)
         or int(target_face_count) <= 0
@@ -99,8 +103,9 @@ def postprocess_mesh(
         )
 
     result = validate_mesh(mesh)
-    result = _filter_components(result, float(component_face_ratio))
-    result = _simplify(result, int(target_face_count))
+    result = _filter_components(result, float(component_face_ratio), device)
+    if target_face_count is not None:
+        result = _simplify(result, int(target_face_count))
     result = validate_mesh(result)
 
     vertices = np.asarray(result.vertices, dtype=np.float64)
@@ -118,34 +123,84 @@ def postprocess_mesh(
 
 
 def _filter_components(
-    mesh: trimesh.Trimesh, component_face_ratio: float
+    mesh: trimesh.Trimesh,
+    component_face_ratio: float,
+    device: torch.device | str | None = None,
 ) -> trimesh.Trimesh:
-    face_count = len(mesh.faces)
-    components = trimesh.graph.connected_components(
-        mesh.face_adjacency,
-        nodes=np.arange(face_count, dtype=np.int64),
-        min_len=1,
-    )
-    if not components:
+    all_faces = np.asarray(mesh.faces, dtype=np.int64)
+    face_count = len(all_faces)
+    labels = _face_components(all_faces, len(mesh.vertices), device)
+    sizes = np.bincount(labels)
+    if sizes.size == 0:
         raise ValueError("mesh contains no connected face components")
 
-    largest = max(components, key=len)
-    kept = [
-        np.asarray(component, dtype=np.int64)
-        for component in components
-        if component is largest
-        or len(component) / face_count >= component_face_ratio
-    ]
-    selected_faces = np.sort(np.concatenate(kept))
-    faces = np.asarray(mesh.faces, dtype=np.int64)[selected_faces]
-    vertex_indices, inverse = np.unique(faces.reshape(-1), return_inverse=True)
-    compact_faces = inverse.reshape(-1, 3)
+    keep = sizes / face_count >= component_face_ratio
+    keep[int(np.argmax(sizes))] = True
+    selected_faces = np.nonzero(keep[labels])[0]
+    faces = all_faces[selected_faces]
+    # Sorted unique vertices and their inverse, as np.unique would return them.
+    used = np.zeros(len(mesh.vertices), dtype=bool)
+    used[faces.reshape(-1)] = True
+    vertex_indices = np.nonzero(used)[0]
+    remap = np.cumsum(used) - 1
+    compact_faces = remap[faces]
     compact_vertices = np.asarray(mesh.vertices, dtype=np.float64)[vertex_indices]
     return trimesh.Trimesh(
         vertices=compact_vertices,
         faces=compact_faces,
         process=False,
     )
+
+
+def _face_components(
+    faces: np.ndarray, num_vertices: int, device: torch.device | str | None
+) -> np.ndarray:
+    """Label faces by connected component, as ``trimesh`` face adjacency defines it.
+
+    Two faces are adjacent when they share an edge used by exactly two faces, the
+    rule of ``Trimesh.face_adjacency``; non-manifold edges connect nothing. Edges are
+    sorted with torch (on ``device`` when given, falling back to the CPU) and the
+    components are found by scipy, which avoids trimesh's per-edge Python grouping.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    face_count = len(faces)
+    work = torch.device(device) if device is not None else torch.device("cpu")
+    try:
+        pairs = _shared_edge_pairs(faces, num_vertices, work)
+    except torch.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        pairs = _shared_edge_pairs(faces, num_vertices, torch.device("cpu"))
+    graph = coo_matrix(
+        (np.ones(len(pairs), dtype=np.int8), (pairs[:, 0], pairs[:, 1])),
+        shape=(face_count, face_count),
+    )
+    _, labels = connected_components(graph, directed=False)
+    return labels
+
+
+def _shared_edge_pairs(
+    faces: np.ndarray, num_vertices: int, device: torch.device
+) -> np.ndarray:
+    tensor = torch.from_numpy(faces).to(device)
+    face_index = torch.arange(len(faces), device=device).repeat(3)
+    starts = torch.cat([tensor[:, 0], tensor[:, 1], tensor[:, 2]])
+    ends = torch.cat([tensor[:, 1], tensor[:, 2], tensor[:, 0]])
+    del tensor
+    keys = torch.minimum(starts, ends) * num_vertices + torch.maximum(starts, ends)
+    del starts, ends
+    keys, order = torch.sort(keys)
+    face_index = face_index[order]
+    del order
+    same = keys[1:] == keys[:-1]
+    del keys
+    # A run of exactly two equal keys: equal to the next, unequal to its neighbours.
+    before = torch.cat([same.new_zeros(1), same[:-1]])
+    after = torch.cat([same[1:], same.new_zeros(1)])
+    starts_of_pairs = (same & ~before & ~after).nonzero().squeeze(1)
+    pairs = torch.stack([face_index[starts_of_pairs], face_index[starts_of_pairs + 1]], dim=1)
+    return pairs.cpu().numpy()
 
 
 def _simplify(mesh: trimesh.Trimesh, target_face_count: int) -> trimesh.Trimesh:
