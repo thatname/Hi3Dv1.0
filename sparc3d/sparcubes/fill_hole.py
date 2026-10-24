@@ -10,56 +10,139 @@ import torch
 from sparc3d.structures.point import Mesh
 
 
-def fill_mesh_holes(mesh: Mesh, length_thresh: int = 10000) -> Mesh:
+def fill_mesh_holes(
+    mesh: Mesh,
+    length_thresh: int = 10000,
+    device: torch.device | str | None = None,
+) -> Mesh:
     """Close every boundary loop of a triangle mesh by ear clipping.
 
-    Boundary half-edges are found on the GPU, then each loop is triangulated on the
-    CPU with numpy. Loops longer than ``length_thresh`` are left open, since ear
-    clipping is quadratic in the loop length.
+    Boundary half-edges are found on the GPU, then the loops are triangulated on the
+    CPU with numpy, all loops of one length at a time. Loops longer than
+    ``length_thresh`` are left open, since ear clipping is quadratic in the loop
+    length.
 
     Args:
         mesh: Mesh to repair. Vertices are reused unchanged; only faces are added.
         length_thresh: Maximum boundary-loop length to fill.
+        device: Device for boundary detection; defaults to the mesh's own, and
+            lets a host-resident mesh use a GPU.
 
     Returns:
         New mesh with the fill triangles appended.
     """
     vertices = mesh.vertices
     faces = mesh.faces
-    device = vertices.device
+    work = faces.device if device is None else torch.device(device)
+    try:
+        boundary_directed = _boundary_half_edges(faces, vertices.shape[0], work)
+    except torch.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        boundary_directed = _boundary_half_edges(faces, vertices.shape[0], torch.device("cpu"))
 
-    # A directed half-edge is on the boundary when its undirected edge occurs once.
-    v0, v1, v2 = faces.unbind(dim=1)
-    directed = torch.cat(
-        [
-            torch.stack([v0, v1], dim=1),
-            torch.stack([v1, v2], dim=1),
-            torch.stack([v2, v0], dim=1),
-        ],
-        dim=0,
-    )
-    undirected = torch.stack(
-        [
-            torch.minimum(directed[:, 0], directed[:, 1]),
-            torch.maximum(directed[:, 0], directed[:, 1]),
-        ],
-        dim=1,
-    )
-    _, inv_idx, counts = torch.unique(
-        undirected, return_inverse=True, return_counts=True, dim=0
-    )
-    boundary_directed = directed[counts[inv_idx] == 1]
-
-    loops = _boundary_loops(boundary_directed.cpu().numpy().astype(int))
-
-    new_faces = [
-        _ear_clip(vertices, loop) for loop in loops if 3 <= len(loop) <= length_thresh
-    ]
-    if new_faces:
-        appended = torch.from_numpy(np.vstack(new_faces)).long().to(device)
-        faces = torch.cat([faces, appended], dim=0)
+    loops = _boundary_loops(boundary_directed)
+    loops = [loop for loop in loops if 3 <= len(loop) <= length_thresh]
+    if loops:
+        positions = vertices.detach().cpu().numpy()
+        appended = torch.from_numpy(_ear_clip_loops(positions, loops)).long()
+        faces = torch.cat([faces, appended.to(faces.device)], dim=0)
 
     return Mesh(vertices=vertices, faces=faces)
+
+
+def _boundary_half_edges(
+    faces: torch.Tensor, num_vertices: int, device: torch.device
+) -> np.ndarray:
+    """Directed half-edges ``[B, 2]`` whose undirected edge occurs once.
+
+    Half-edges are numbered as ``[v0→v1 of every face, v1→v2, v2→v0]`` and returned
+    in that order. Sorting one int64 key per half-edge keeps the working set to a
+    few copies of that key, where a row-wise ``torch.unique`` needs several times
+    more on meshes of tens of millions of faces.
+    """
+    face_count = faces.shape[0]
+    # Keys, the sorted copy, its order and the sort's scratch: about six int64 per edge.
+    if device.type == "cuda" and torch.cuda.mem_get_info(device)[0] < 3 * face_count * 8 * 6:
+        device = torch.device("cpu")
+    faces = faces.to(device).int()
+    starts = torch.cat([faces[:, 0], faces[:, 1], faces[:, 2]])
+    ends = torch.cat([faces[:, 1], faces[:, 2], faces[:, 0]])
+    keys = torch.minimum(starts, ends).long() * num_vertices + torch.maximum(starts, ends).long()
+    del starts, ends
+    keys, order = torch.sort(keys)
+    distinct = torch.ones(keys.shape[0] + 1, dtype=torch.bool, device=device)
+    distinct[1:-1] = keys[1:] != keys[:-1]
+    del keys
+    single = distinct[:-1] & distinct[1:]
+    half_edges = torch.sort(order[single]).values
+    del order, distinct, single
+    slot, face = half_edges // face_count, half_edges % face_count
+    boundary = torch.stack([faces[face, slot], faces[face, (slot + 1) % 3]], dim=1)
+    return boundary.cpu().numpy().astype(int)
+
+
+def _ear_clip_loops(positions: np.ndarray, loops: List[List[int]]) -> np.ndarray:
+    """Triangulate many boundary loops as :func:`_ear_clip` does, batched by length.
+
+    Every step clips one ear from each loop of the current longest length, which
+    then joins the loops one vertex shorter, so the whole set takes as many
+    vectorized steps as the longest loop has vertices. The arithmetic is
+    :func:`_ear_clip`'s, and the triangles are returned in the order loop-by-loop
+    clipping would emit them.
+    """
+    lengths = np.array([len(loop) for loop in loops])
+    offsets = np.zeros(len(loops) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum(lengths - 2)
+    out = np.empty((int(offsets[-1]), 3), dtype=int)
+
+    # length -> (loop ids, vertex indices [B, length], positions [B, length, 3])
+    groups: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for length in np.unique(lengths):
+        members = np.nonzero(lengths == length)[0]
+        idx = np.array([loops[i] for i in members], dtype=int)
+        groups[int(length)] = (members, idx, positions[idx])
+
+    while groups:
+        current = max(groups)
+        members, idx, boundline = groups.pop(current)
+        written = lengths[members] - current
+        batch = np.arange(len(members))
+        if current == 3:
+            out[offsets[members] + written] = idx[:, [2, 1, 0]]
+            continue
+        next_pts = np.roll(boundline, -1, axis=1)
+        T = next_pts - boundline
+        T = T / (np.linalg.norm(T, axis=2, keepdims=True) + 1e-6)
+        T_prev = np.roll(T, 1, axis=1)
+        N = np.cross(-T_prev, T)
+        center = boundline.mean(axis=1, keepdims=True)
+        P = next_pts - center
+        Q = boundline - center
+        sin_sign = np.sign((np.cross(P, Q) * N).sum(axis=2, keepdims=True))
+        sin_val = np.linalg.norm(N, axis=2, keepdims=True) * sin_sign
+        cos_val = -(T_prev * T).sum(axis=2, keepdims=True)
+        A = np.arctan2(sin_val, cos_val)[..., 0]
+        collapsed = A == 0.0
+        score = np.where(collapsed, np.inf, 1.0 / np.where(collapsed, 1.0, A))
+        ear = np.argmax(score, axis=1)
+        i0 = (ear + 1) % current
+        i2 = (ear - 1) % current
+        out[offsets[members] + written] = np.stack(
+            [idx[batch, i0], idx[batch, ear], idx[batch, i2]], axis=1
+        )
+        keep = np.ones(idx.shape, dtype=bool)
+        keep[batch, ear] = False
+        shorter = (
+            members,
+            idx[keep].reshape(len(members), current - 1),
+            boundline[keep].reshape(len(members), current - 1, 3),
+        )
+        if current - 1 in groups:
+            shorter = tuple(
+                np.concatenate([a, b]) for a, b in zip(groups[current - 1], shorter)
+            )
+        groups[current - 1] = shorter
+    return out
 
 
 def _boundary_loops(boundary: np.ndarray) -> List[List[int]]:

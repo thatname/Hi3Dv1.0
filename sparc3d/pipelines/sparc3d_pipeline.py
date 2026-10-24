@@ -88,6 +88,17 @@ class Sparc3DPipeline:
         self._device = torch.device("cpu")
         self._decode_device = torch.device("cpu")
         self._sequential_cpu_offload = False
+        self.pass_budgets: tuple[int, ...] = PASS_BUDGETS
+        """Occupied-voxel budget per rung; raising it trades sampling time for detail."""
+        self.decode_feature_ceiling: int | None = DECODE_FEATURE_CEILING
+        """Decoded rows above which another pass is refused; ``None`` disables it."""
+        self.output_face_count: int | None = None
+        """Final face count: ``None`` uses :data:`TARGET_FACE_COUNTS`, ``0`` skips simplification."""
+        self.offload_idle_models = False
+        """Keep only the components a stage is using on the GPU."""
+        self._streaming_devices: list[torch.device] | None = None
+        self._chunk_bytes = 0
+        self._streamer: Any = None
 
     @classmethod
     def from_pretrained(
@@ -206,7 +217,67 @@ class Sparc3DPipeline:
             self._transformer_1024.to(target)
         self._device = target
         self._decode_device = decode_target
+        self._release_streamer()
         return self
+
+    def enable_streamed_decoding(
+        self,
+        devices: list[str | torch.device] | None = None,
+        chunk_bytes: int | None = None,
+    ) -> "Sparc3DPipeline":
+        """Decode and extract out of core, in tiles shared across ``devices``.
+
+        Level tensors are kept in host memory and each tile visits a GPU only while
+        it is computed, so decoding is no longer bounded by one device's memory and
+        the feature ceiling can be raised. Results match the in-memory decoder up to
+        floating-point summation order.
+
+        Args:
+            devices: Additional CUDA devices sharing the tiles. The decode device is
+                always included and runs the latent-level attention stack.
+            chunk_bytes: Approximate device working set of one tile chunk.
+
+        Returns:
+            This pipeline.
+        """
+        from sparc3d.models.autoencoders.streaming import DEFAULT_CHUNK_BYTES
+
+        self._streaming_devices = [torch.device(device) for device in (devices or [])]
+        self._chunk_bytes = int(chunk_bytes or DEFAULT_CHUNK_BYTES)
+        self._release_streamer()
+        return self
+
+    def disable_streamed_decoding(self) -> "Sparc3DPipeline":
+        """Return to decoding each pass in device memory on the decode device."""
+        self._streaming_devices = None
+        self._release_streamer()
+        return self
+
+    def set_decoder_skip_points(self, skip_points: int) -> "Sparc3DPipeline":
+        """Set the point count above which decoder residual blocks are bypassed.
+
+        The release bypasses them above 12M points to fit device memory; streamed
+        decoding has no such limit, so a larger value runs the full network.
+        """
+        from sparc3d.models.autoencoders.blocks import SparseResnetBlock
+
+        for module in self.vae.modules():
+            if isinstance(module, SparseResnetBlock):
+                module.skip_points = int(skip_points)
+        self._release_streamer()
+        return self
+
+    def _release_streamer(self) -> None:
+        if self._streamer is not None:
+            self._streamer.release()
+            self._streamer = None
+
+    def _stream_devices(self) -> list[torch.device]:
+        devices = [self._decode_device]
+        for device in self._streaming_devices or []:
+            if device not in devices:
+                devices.append(device)
+        return devices
 
     def enable_sequential_cpu_offload(
         self, device: str | torch.device = "cuda"
@@ -289,9 +360,8 @@ class Sparc3DPipeline:
 
         prepared = prepare_image(image)
         mesh = validate_mesh(coarse_mesh)
-        with self._on(self._device):
-            condition = self.conditioner(prepared).to(self._device)
-        coords = self._adaptive_voxelize(mesh, 64, PASS_BUDGETS[0])
+        condition = self._condition(prepared)
+        coords = self._adaptive_voxelize(mesh, 64, self.pass_budgets[0])
         return self._run_refinement(
             condition,
             coords,
@@ -334,8 +404,7 @@ class Sparc3DPipeline:
         from sparc3d.utils.image import prepare_image
 
         prepared = prepare_image(image)
-        with self._on(self._device):
-            condition = self.conditioner(prepared).to(self._device)
+        condition = self._condition(prepared)
         return self._run_refinement(
             condition,
             coords,
@@ -366,6 +435,8 @@ class Sparc3DPipeline:
             transformer = (
                 self.transformer_512 if structure == 64 else self.transformer_1024
             )
+            if self.offload_idle_models:
+                self._keep_on_device(transformer)
             with self._on(self._device):
                 latents = self._sample_latents(
                     transformer,
@@ -381,10 +452,11 @@ class Sparc3DPipeline:
                 decoded = self._decode_latents(latents, structure)
                 has_another_pass = ladder_index < target_index
                 decoded_features = self._decoded_feature_count(decoded)
-                if has_another_pass and decoded_features > DECODE_FEATURE_CEILING:
+                ceiling = self.decode_feature_ceiling
+                if has_another_pass and ceiling is not None and decoded_features > ceiling:
                     raise RuntimeError(
                         "decoded feature ceiling exceeded before another pass: "
-                        f"{decoded_features} > {DECODE_FEATURE_CEILING}"
+                        f"{decoded_features} > {ceiling}"
                     )
                 mesh = self._extract_mesh(decoded)
                 del decoded
@@ -394,13 +466,17 @@ class Sparc3DPipeline:
                 coords = self._adaptive_voxelize(
                     mesh,
                     STRUCTURE_RESOLUTIONS[next_index],
-                    PASS_BUDGETS[next_index],
+                    self.pass_budgets[next_index],
                 )
 
         if mesh is None:
             raise RuntimeError("refinement ladder completed without producing a mesh")
+        if self.output_face_count is None:
+            target_face_count = TARGET_FACE_COUNTS[target_index]
+        else:
+            target_face_count = int(self.output_face_count) or None
         mesh = self._postprocess_mesh(
-            mesh, target_face_count=TARGET_FACE_COUNTS[target_index]
+            mesh, target_face_count=target_face_count
         )
         return Sparc3DPipelineOutput(mesh=mesh, resolution=resolution)
 
@@ -492,6 +568,25 @@ class Sparc3DPipeline:
         negative = transformer(sample, model_timestep, negative_condition)
         return apply_effective_guidance(positive.feats, negative.feats, timestep)
 
+    def _condition(self, prepared: Any) -> torch.Tensor:
+        if self.offload_idle_models and self._device.type == "cuda":
+            self.conditioner.to(self._device)
+        with self._on(self._device):
+            return self.conditioner(prepared).to(self._device)
+
+    def _keep_on_device(self, transformer: Any) -> None:
+        """Move the transformer about to sample onto the device and the rest off it."""
+        if self._device.type != "cuda":
+            return
+        idle = [self.conditioner, self.transformer_512]
+        if self._transformer_1024 is not None:
+            idle.append(self._transformer_1024)
+        for model in idle:
+            if model is not transformer:
+                model.to("cpu")
+        transformer.to(self._device)
+        torch.cuda.empty_cache()
+
     def _decode_latents(self, latents: Any, structure_resolution: int) -> Any:
         grid_coord = latents.coords[:, 1:].int().to(self._decode_device)
         mapping = {
@@ -504,6 +599,14 @@ class Sparc3DPipeline:
                 [grid_coord.shape[0]], dtype=torch.int64, device=grid_coord.device
             ),
         }
+        if self._streaming_devices is not None and self._decode_device.type == "cuda":
+            from sparc3d.models.autoencoders.streaming import StreamedDecoder
+
+            if self._streamer is None:
+                self._streamer = StreamedDecoder(
+                    self.vae.decoder, self._stream_devices(), self._chunk_bytes
+                )
+            return self._streamer.decode(mapping)
         with torch.autocast(
             device_type=self._decode_device.type,
             enabled=self._decode_device.type == "cuda",
@@ -515,14 +618,20 @@ class Sparc3DPipeline:
         features = decoded["feat"] if isinstance(decoded, dict) else decoded.feat
         return int(features.shape[0])
 
-    @staticmethod
-    def _extract_mesh(decoded: Any) -> Any:
+    def _extract_mesh(self, decoded: Any) -> Any:
         import trimesh
 
+        from sparc3d.models.autoencoders.streaming import StreamedDecoding
         from sparc3d.sparcubes.extract import point_to_mesh
         from sparc3d.sparcubes.fill_hole import fill_mesh_holes
 
-        mesh = fill_mesh_holes(point_to_mesh(decoded))
+        if isinstance(decoded, StreamedDecoding):
+            from sparc3d.sparcubes.tiled_extract import tiled_point_to_mesh
+
+            mesh = tiled_point_to_mesh(decoded, self._stream_devices())
+            mesh = fill_mesh_holes(mesh, device=self._decode_device)
+        else:
+            mesh = fill_mesh_holes(point_to_mesh(decoded))
         if not mesh.success:
             raise RuntimeError("mesh extraction produced an empty isosurface")
         return trimesh.Trimesh(
@@ -551,13 +660,14 @@ class Sparc3DPipeline:
             return torch.cuda.device(device)
         return contextlib.nullcontext()
 
-    def _postprocess_mesh(self, mesh: Any, *, target_face_count: int) -> Any:
+    def _postprocess_mesh(self, mesh: Any, *, target_face_count: int | None) -> Any:
         from sparc3d.sparcubes.postprocess import postprocess_mesh
 
         return postprocess_mesh(
             mesh,
             target_face_count=target_face_count,
             component_face_ratio=COMPONENT_FACE_RATIO,
+            device=self._decode_device if self._decode_device.type == "cuda" else None,
         )
 
     @staticmethod
