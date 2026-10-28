@@ -29,8 +29,9 @@ Hi3D v1.0 以同一物体的参考图和粗网格为输入，细化生成高分�
 | 1 | 64³ | 512³ | `transformer_512` |
 | 2 | 128³ | 1024³ | `transformer_1024` |
 | 3 | 192³ | 1536³ | `transformer_1024` |
+| 4（扩展） | 256³ | 2048³ | `transformer_1024` |
 
-请求 512³ 时运行一轮，1024³ 运行两轮，1536³ 运行三轮。以上数值表示标称稀疏坐标与提取网格，并非稠密 1536³ 潜变量张量，也不表示固定的三角面数。详见[流程说明](docs/pipeline.md)。
+请求 512³ 时运行一轮，1024³ 运行两轮，1536³ 运行三轮，2048³ 运行四轮。也可传入列表（如 `resolution=(512, 1024, 2048)` 或 `(2048,)`，演示脚本中为 `--ladder 512 1024 2048`）显式指定各轮。2048³ 为超出发布流程的扩展档，需配合流式解码；在 24 GB RTX 4090 上峰值分配为 12 GiB。以上数值表示标称稀疏坐标与提取网格，并非稠密 1536³ 潜变量张量，也不表示固定的三角面数。详见[流程说明](docs/pipeline.md)。
 
 ## 效果对比
 
@@ -116,7 +117,7 @@ result = pipeline(
 result.mesh.export("refined.glb")
 ```
 
-`result` 为 `Sparc3DPipelineOutput`，包含纯几何 `trimesh.Trimesh` 与实际生成的 `resolution`。支持 **512、1024、1536** 三档分辨率，默认每轮进行 25 次调度更新。`seed` 与本地 CPU `torch.Generator` 二选一。若已有形状为 `[N, 3]` 的唯一整数体素坐标，可使用 `pipeline.refine_voxels(image, voxel_coords, structure_resolution=64, resolution=1536, seed=0)`。
+`result` 为 `Sparc3DPipelineOutput`，包含纯几何 `trimesh.Trimesh` 与实际生成的 `resolution`。支持 **512、1024、1536、2048** 四档分辨率（2048 需 `enable_streamed_decoding()`），默认每轮进行 25 次调度更新。`seed` 与本地 CPU `torch.Generator` 二选一。若已有形状为 `[N, 3]` 的唯一整数体素坐标，可使用 `pipeline.refine_voxels(image, voxel_coords, structure_resolution=64, resolution=1536, seed=0)`。
 
 ### 内存卸载与进度
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from numbers import Integral
 from pathlib import Path
 from typing import Any
@@ -20,17 +20,24 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[Sparc3DProgressEvent], None]
 """Callback invoked after each completed scheduler update."""
 
-STRUCTURE_RESOLUTIONS = (64, 128, 192)
+STRUCTURE_RESOLUTIONS = (64, 128, 192, 256)
 """Sparse structure resolution of each rung of the refinement ladder."""
 
-OUTPUT_RESOLUTIONS = (512, 1024, 1536)
+OUTPUT_RESOLUTIONS = (512, 1024, 1536, 2048)
 """Mesh resolution produced by each rung, parallel to :data:`STRUCTURE_RESOLUTIONS`."""
 
-PASS_BUDGETS = (80_000, 90_000, 110_000)
+PASS_BUDGETS = (80_000, 90_000, 110_000, 300_000)
 """Occupied-voxel budget adaptive voxelization targets at each rung."""
 
-TARGET_FACE_COUNTS = (1_000_000, 1_000_000, 2_000_000)
+TARGET_FACE_COUNTS = (1_000_000, 1_000_000, 2_000_000, 4_000_000)
 """Face count the final mesh is simplified to, per :data:`OUTPUT_RESOLUTIONS` entry."""
+
+STREAMED_ONLY_RESOLUTIONS = (2048,)
+"""Rungs whose final decode is not expected to fit one device without streaming.
+
+The 2048 rung extends the release ladder: ``transformer_1024`` samples its 256 grid
+through rescaled rotary positions, and it was validated with
+:meth:`Sparc3DPipeline.enable_streamed_decoding` rather than the in-memory decoder."""
 
 DECODE_FEATURE_CEILING = 12_000_000
 """Decoded feature rows above which a further pass would exhaust device memory."""
@@ -333,7 +340,7 @@ class Sparc3DPipeline:
         self,
         image: Any,
         coarse_mesh: Any,
-        resolution: int = 1024,
+        resolution: int | Sequence[int] = 1024,
         num_inference_steps: int = 25,
         generator: torch.Generator | None = None,
         seed: int | None = None,
@@ -343,7 +350,10 @@ class Sparc3DPipeline:
         Args:
             image: Batch-1 PIL image.
             coarse_mesh: In-memory ``trimesh.Trimesh`` or transformed scene.
-            resolution: Requested output resolution.
+            resolution: Requested output resolution, which runs every rung up to
+                it, or the strictly increasing output resolutions of the passes
+                to run. The coarse mesh is voxelized at the first pass's grid, so
+                ``(2048,)`` refines it in a single 256 pass.
             num_inference_steps: Scheduler updates run in each pass.
             generator: Optional local CPU random generator.
             seed: Optional seed used to create a local CPU generator.
@@ -353,7 +363,7 @@ class Sparc3DPipeline:
         """
         local_generator = self._resolve_generator(generator, seed)
         self._validate_steps(num_inference_steps)
-        self._validate_target_resolution(resolution)
+        ladder = self._resolve_ladder(resolution, start_index=None)
 
         from sparc3d.sparcubes.postprocess import validate_mesh
         from sparc3d.utils.image import prepare_image
@@ -361,12 +371,13 @@ class Sparc3DPipeline:
         prepared = prepare_image(image)
         mesh = validate_mesh(coarse_mesh)
         condition = self._condition(prepared)
-        coords = self._adaptive_voxelize(mesh, 64, self.pass_budgets[0])
+        coords = self._adaptive_voxelize(
+            mesh, STRUCTURE_RESOLUTIONS[ladder[0]], self.pass_budgets[ladder[0]]
+        )
         return self._run_refinement(
             condition,
             coords,
-            structure_resolution=64,
-            resolution=resolution,
+            ladder=ladder,
             num_inference_steps=num_inference_steps,
             generator=local_generator,
         )
@@ -377,7 +388,7 @@ class Sparc3DPipeline:
         image: Any,
         voxel_coords: Any,
         structure_resolution: int,
-        resolution: int,
+        resolution: int | Sequence[int],
         num_inference_steps: int = 25,
         generator: torch.Generator | None = None,
         seed: int | None = None,
@@ -388,7 +399,9 @@ class Sparc3DPipeline:
             image: Batch-1 PIL image.
             voxel_coords: Unique integer coordinates shaped ``[N, 3]``.
             structure_resolution: Grid resolution represented by ``voxel_coords``.
-            resolution: Requested output resolution.
+            resolution: Requested output resolution, or the increasing output
+                resolutions of the passes to run, starting with the rung of
+                ``structure_resolution``.
             num_inference_steps: Scheduler updates run in each pass.
             generator: Optional local CPU random generator.
             seed: Optional seed used to create a local CPU generator.
@@ -399,7 +412,9 @@ class Sparc3DPipeline:
         local_generator = self._resolve_generator(generator, seed)
         self._validate_steps(num_inference_steps)
         coords = self._validate_voxel_coords(voxel_coords, structure_resolution)
-        self._validate_start_target(structure_resolution, resolution)
+        ladder = self._resolve_ladder(
+            resolution, start_index=STRUCTURE_RESOLUTIONS.index(int(structure_resolution))
+        )
 
         from sparc3d.utils.image import prepare_image
 
@@ -408,8 +423,7 @@ class Sparc3DPipeline:
         return self._run_refinement(
             condition,
             coords,
-            structure_resolution=structure_resolution,
-            resolution=resolution,
+            ladder=ladder,
             num_inference_steps=num_inference_steps,
             generator=local_generator,
         )
@@ -419,18 +433,22 @@ class Sparc3DPipeline:
         condition: torch.Tensor,
         voxel_coords: torch.Tensor,
         *,
-        structure_resolution: int,
-        resolution: int,
+        ladder: tuple[int, ...],
         num_inference_steps: int,
         generator: torch.Generator,
     ) -> Sparc3DPipelineOutput:
-        start_index = STRUCTURE_RESOLUTIONS.index(structure_resolution)
-        target_index = OUTPUT_RESOLUTIONS.index(resolution)
-        pass_indices = list(range(start_index, target_index + 1))
+        target_index = ladder[-1]
+        resolution = OUTPUT_RESOLUTIONS[target_index]
+        if resolution in STREAMED_ONLY_RESOLUTIONS and self._streaming_devices is None:
+            logger.warning(
+                "%d output without streamed decoding may exhaust device memory; "
+                "call enable_streamed_decoding() first",
+                resolution,
+            )
         mesh = None
         coords = voxel_coords
 
-        for call_pass_index, ladder_index in enumerate(pass_indices):
+        for call_pass_index, ladder_index in enumerate(ladder):
             structure = STRUCTURE_RESOLUTIONS[ladder_index]
             transformer = (
                 self.transformer_512 if structure == 64 else self.transformer_1024
@@ -446,11 +464,11 @@ class Sparc3DPipeline:
                     num_inference_steps,
                     generator,
                     pass_index=call_pass_index,
-                    num_passes=len(pass_indices),
+                    num_passes=len(ladder),
                 )
             with self._on(self._decode_device):
                 decoded = self._decode_latents(latents, structure)
-                has_another_pass = ladder_index < target_index
+                has_another_pass = call_pass_index + 1 < len(ladder)
                 decoded_features = self._decoded_feature_count(decoded)
                 ceiling = self.decode_feature_ceiling
                 if has_another_pass and ceiling is not None and decoded_features > ceiling:
@@ -462,7 +480,7 @@ class Sparc3DPipeline:
                 del decoded
 
             if has_another_pass:
-                next_index = ladder_index + 1
+                next_index = ladder[call_pass_index + 1]
                 coords = self._adaptive_voxelize(
                     mesh,
                     STRUCTURE_RESOLUTIONS[next_index],
@@ -748,25 +766,45 @@ class Sparc3DPipeline:
             raise ValueError("num_inference_steps must be a positive integer")
 
     @staticmethod
-    def _validate_target_resolution(resolution: int) -> None:
-        if (
-            isinstance(resolution, bool)
-            or not isinstance(resolution, Integral)
-            or int(resolution) not in OUTPUT_RESOLUTIONS
-        ):
-            raise ValueError(
-                "resolution must be one of "
-                + ", ".join(str(value) for value in OUTPUT_RESOLUTIONS)
-            )
+    def _resolve_ladder(
+        resolution: int | Sequence[int], *, start_index: int | None
+    ) -> tuple[int, ...]:
+        """Return the indices of the rungs to run for ``resolution``.
 
-    @classmethod
-    def _validate_start_target(
-        cls, structure_resolution: int, resolution: int
-    ) -> None:
-        cls._validate_target_resolution(resolution)
-        # A pass can only start at or below the rung its structure resolution names.
-        start_index = STRUCTURE_RESOLUTIONS.index(int(structure_resolution))
-        if resolution not in OUTPUT_RESOLUTIONS[start_index:]:
+        Args:
+            resolution: Target output resolution, run through every rung from the
+                start, or the strictly increasing output resolutions of each pass.
+            start_index: Rung of the given voxel coordinates, which a ladder must
+                begin with, or ``None`` for a coarse mesh, which any rung can start.
+
+        Raises:
+            ValueError: An entry is not an output resolution, the ladder is empty or
+                not increasing, or it does not start at ``start_index``.
+        """
+        choices = ", ".join(str(value) for value in OUTPUT_RESOLUTIONS)
+
+        def index_of(value: Any) -> int:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Integral)
+                or int(value) not in OUTPUT_RESOLUTIONS
+            ):
+                raise ValueError(f"resolution must be one of {choices}, got {value!r}")
+            return OUTPUT_RESOLUTIONS.index(int(value))
+
+        if isinstance(resolution, Sequence) and not isinstance(resolution, str):
+            ladder = tuple(index_of(value) for value in resolution)
+            if not ladder:
+                raise ValueError("resolution ladder must not be empty")
+            if any(later <= earlier for earlier, later in zip(ladder, ladder[1:])):
+                raise ValueError("resolution ladder must be strictly increasing")
+        else:
+            first = 0 if start_index is None else start_index
+            ladder = tuple(range(first, index_of(resolution) + 1))
+        if start_index is not None and (not ladder or ladder[0] != start_index):
+            structure = STRUCTURE_RESOLUTIONS[start_index]
             raise ValueError(
-                f"structure resolution {structure_resolution} cannot target {resolution}"
+                f"structure resolution {structure} must start the ladder at "
+                f"{OUTPUT_RESOLUTIONS[start_index]}, got {resolution!r}"
             )
+        return ladder
