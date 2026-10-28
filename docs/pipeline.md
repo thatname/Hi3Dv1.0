@@ -14,11 +14,25 @@ mesh. Revoxelizing that mesh provides the sparse support for the next pass.
 | 1 | 64³ | 80,000 | `transformer_512` | 512³ |
 | 2 | 128³ | 90,000 | `transformer_1024` | 1024³ |
 | 3 | 192³ | 110,000 | `transformer_1024` | 1536³ |
+| 4 (extension) | 256³ | 300,000 | `transformer_1024` | 2048³ |
 
-Requesting 512³ runs one pass, 1024³ runs two, and 1536³ runs all three. Each pass
-uses the preceding mesh to place its sparse coordinates. The `transformer_1024`
-model serves both the 128³ and 192³ structural grids; its configuration names
-128, while its coordinate-based architecture also supports the third pass.
+Requesting 512³ runs one pass, 1024³ runs two, 1536³ runs three, and 2048³ runs
+all four. Each pass uses the preceding mesh to place its sparse coordinates. The
+`transformer_1024` model serves the 128³, 192³ and 256³ structural grids; its
+configuration names 128, while its coordinate-based architecture also supports
+the later passes.
+
+`resolution` also accepts the strictly increasing output resolutions of the
+passes to run, so rungs can be skipped: `(512, 1024, 2048)` revoxelizes the
+1024³ mesh straight onto the 256³ grid, and `(2048,)` voxelizes the coarse mesh
+at 256³ for a single pass. The demos expose this as `--ladder 512 1024 2048` or
+`--ladder 2048`.
+
+The 2048³ rung is not part of the release ladder. It is expected to run with
+streamed decoding (`enable_streamed_decoding()`); the pipeline logs a warning
+otherwise, and the demos enable it, lift the decoded feature ceiling, run the
+full decoder, and keep only the active model on the GPU whenever 2048 is
+requested. See [Memory](#memory) for measured peaks.
 These grid labels do not indicate a dense latent tensor or a fixed output
 triangle count.
 
@@ -108,8 +122,8 @@ The final mesh is filtered, simplified, and normalized:
 
 1. Disconnected components with fewer than 0.5% of all faces are removed; the
    largest component is always retained.
-2. `pyfqmr` simplifies toward 1,000,000 faces at 512³ or 1024³, and 2,000,000 at
-   1536³. These are simplification targets, not guaranteed exact counts.
+2. `pyfqmr` simplifies toward 1,000,000 faces at 512³ or 1024³, 2,000,000 at
+   1536³, and 4,000,000 at 2048³. These are simplification targets, not guaranteed exact counts.
 3. The mean vertex position is subtracted, then vertices are scaled so the
    maximum radius is one. Input world-space position and absolute scale are
    not preserved.
@@ -146,6 +160,24 @@ Offload reduces model residency but not all decoded-feature memory costs.
 The 1536³ ladder has been validated only on a **96 GB NVIDIA H20**. Peak memory
 and feasibility on smaller cards have not been established; see the
 [validated environment](installation.md#the-verified-stack).
+
+The 2048³ extension was measured on one **24 GB RTX 4090** with the demo settings
+(streamed decoding, idle models offloaded) on a single test mesh,
+`--ladder 512 1024 2048`:
+
+| Phase | Size | Peak allocated | Peak reserved |
+| --- | ---: | ---: | ---: |
+| Sampling at 128³ | 42,191 voxels | 5.7 GiB | 7.0 GiB |
+| Sampling at 256³ | 185,365 voxels | 12.0 GiB | 16.4 GiB |
+| Streamed decode at 2048³ | 12.4M rows | 6.0 GiB | — |
+| Tiled extraction at 2048³ | 24.5M faces | 8.1 GiB | — |
+
+Sampling at 256³ sets the peak, and it grows with the voxel budget rather than
+the output label. About 3.8 GiB of each figure is the resident transformer.
+`nvidia-smi` reported 17.1 GiB at peak because the caching allocator holds freed
+blocks; host memory peaked at 23.8 GiB. The run took 605 s, 411 s of it in the
+256³ pass. Lowering the fourth `pass_budgets` entry reduces sampling memory at
+the cost of coarser support.
 
 Voxelization is adaptive. If occupied coordinates exceed a pass's voxel budget,
 the grid resolution is reduced by 5% and voxelization retries. Complex geometry

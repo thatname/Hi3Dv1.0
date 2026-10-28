@@ -27,8 +27,9 @@ Image features condition sparse flow on coordinates derived from the coarse geom
 | 1 | 64³ | 512³ | `transformer_512` |
 | 2 | 128³ | 1024³ | `transformer_1024` |
 | 3 | 192³ | 1536³ | `transformer_1024` |
+| 4 (extension) | 256³ | 2048³ | `transformer_1024` |
 
-A 512³ request runs one pass; 1024³ runs two; 1536³ runs all three. These labels describe nominal sparse coordinate and extraction grids, rather than a dense 1536³ latent tensor or a fixed triangle count. See [pipeline details](docs/pipeline.md).
+A 512³ request runs one pass; 1024³ runs two; 1536³ runs three; 2048³ runs all four. A list such as `resolution=(512, 1024, 2048)` or `(2048,)`, or `--ladder 512 1024 2048` in the demos, picks the passes explicitly. The 2048³ rung is an extension beyond the release ladder that uses streamed decoding; it peaked at 12 GiB allocated on a 24 GB RTX 4090. These labels describe nominal sparse coordinate and extraction grids, rather than a dense 1536³ latent tensor or a fixed triangle count. See [pipeline details](docs/pipeline.md).
 
 ## Visual comparisons
 
@@ -114,7 +115,7 @@ result = pipeline(
 result.mesh.export("refined.glb")
 ```
 
-`result` is a `Sparc3DPipelineOutput` containing a geometry-only `trimesh.Trimesh` and the achieved `resolution`. Supported resolutions are **512, 1024, and 1536**, with 25 scheduler updates per pass by default. Supply `seed` or a local CPU `torch.Generator`, not both. For existing unique integer voxel coordinates shaped `[N, 3]`, the API also provides `pipeline.refine_voxels(image, voxel_coords, structure_resolution=64, resolution=1536, seed=0)`.
+`result` is a `Sparc3DPipelineOutput` containing a geometry-only `trimesh.Trimesh` and the achieved `resolution`. Supported resolutions are **512, 1024, 1536, and 2048** (the last with `enable_streamed_decoding()`), with 25 scheduler updates per pass by default. Supply `seed` or a local CPU `torch.Generator`, not both. For existing unique integer voxel coordinates shaped `[N, 3]`, the API also provides `pipeline.refine_voxels(image, voxel_coords, structure_resolution=64, resolution=1536, seed=0)`.
 
 ### Memory offload and progress
 

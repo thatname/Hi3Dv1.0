@@ -16,6 +16,7 @@ from PIL import Image
 from sparc3d import Sparc3DPipeline
 
 from coarse_stage import generate_coarse_mesh, load_coarse_generator
+from ladder import add_ladder_arguments, configure_ladder
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional path to also save the intermediate coarse mesh to.",
     )
-    parser.add_argument("--resolution", type=int, choices=(512, 1024, 1536), default=1024)
+    add_ladder_arguments(parser)
     parser.add_argument("--num-inference-steps", type=int, default=25)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
@@ -104,10 +105,11 @@ def main() -> int:
         pipeline.enable_sequential_cpu_offload(args.device)
     else:
         pipeline.to(args.device)
+    resolution = configure_ladder(pipeline, args)
     result = pipeline(
         image,
         coarse_mesh,
-        resolution=args.resolution,
+        resolution=resolution,
         num_inference_steps=args.num_inference_steps,
         seed=args.seed,
     )
