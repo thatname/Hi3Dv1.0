@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>G0 · Mesh 浏览</title>
+  <title>G0 · Mesh 与 A1/A2 场浏览</title>
   <style>
     :root { color-scheme: dark; font: 14px system-ui, sans-serif; }
     * { box-sizing: border-box; }
@@ -25,19 +25,37 @@
     #toolbar { display: flex; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid #2d3848; }
     #toolbar label { display: flex; gap: 6px; align-items: center; }
     #toolbar input { width: auto; margin: 0; }
+    #toolbar select { width: auto; margin: 0; }
+    #sliceControls { display: none; gap: 8px; align-items: center; }
+    #sliceIndex { width: 140px !important; }
     #viewport { flex: 1; position: relative; min-height: 0; }
     canvas { width: 100%; height: 100%; display: block; touch-action: none; }
-    #overlay { position: absolute; left: 16px; top: 16px; max-width: min(680px, calc(100% - 32px));
-               padding: 10px 12px; background: #111a27d9; border: 1px solid #334359; border-radius: 8px;
-               overflow-wrap: anywhere; white-space: pre-line; pointer-events: none; line-height: 1.5; }
+    #fieldWrap { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; }
+    #fieldCanvas { width: auto; height: min(85vh, 95%); max-width: 95%; aspect-ratio: 1;
+                   image-rendering: pixelated; border: 1px solid #45546b; }
+    #overlay { padding: 8px 16px; background: #111a27; border-bottom: 1px solid #334359;
+               overflow-wrap: anywhere; overflow-y: auto; max-height: 112px; min-height: 45px;
+               white-space: pre-line; line-height: 1.4; font-size: 12px; }
     #hint { padding: 10px 16px; border-top: 1px solid #2d3848; }
-    @media (max-width: 740px) { aside { width: 220px; min-width: 180px; } #toolbar { flex-wrap: wrap; } }
+    @media (max-width: 740px) {
+      body { flex-direction: column; }
+      aside { width: 100%; min-width: 0; height: 190px; flex: none; }
+      aside header { padding: 8px; }
+      aside h1 { font-size: 14px; }
+      aside input, aside select { margin-top: 4px; padding: 4px; }
+      #list { display: flex; overflow-x: auto; overflow-y: hidden; }
+      .item { min-width: 175px; width: 175px; border-right: 1px solid #25303f; }
+      #toolbar { flex-wrap: wrap; padding: 6px; gap: 6px; }
+      #meshHint { display: none !important; }
+      main { min-height: 0; }
+      #hint { padding: 6px 8px; font-size: 10px; }
+    }
   </style>
 </head>
 <body>
   <aside>
     <header>
-      <h1>G0 · 远端 Mesh</h1>
+      <h1>G0 · Mesh / A1 / A2</h1>
       <div id="count" class="muted">加载清单中…</div>
       <input id="search" type="search" placeholder="搜索文件名或编号">
       <select id="filter"><option value="all">全部</option><option value="loaded">可加载</option>
@@ -46,16 +64,22 @@
     <div id="list"></div>
   </aside>
   <main>
-    <div id="toolbar"><button id="reset">重置视角</button><label><input id="wire" type="checkbox">线框</label>
-      <span class="muted">左键拖动旋转 · 中键拖动平移 · 滚轮缩放</span></div>
-    <div id="viewport"><canvas id="canvas"></canvas><div id="overlay">选择左侧资产</div></div>
-    <div id="hint" class="muted">显示时自动居中缩放；源文件不修改。闭合性只作候选判断。缺少外部 .bin 的 glTF 无法显示几何。</div>
+    <div id="toolbar"><select id="mode"><option value="source">输入 mesh</option></select>
+      <button id="reset">重置视角</button><label><input id="wire" type="checkbox">线框</label>
+      <div id="sliceControls"><select id="sliceAxis"><option value="x">X 切片</option><option value="y">Y 切片</option><option value="z" selected>Z 切片</option></select>
+        <input id="sliceIndex" type="range" min="0" max="127" value="64"><span id="sliceLabel" class="muted">64 / 127</span></div>
+      <span id="meshHint" class="muted">左键旋转 · 中键平移 · 滚轮缩放</span></div>
+    <div id="overlay">选择左侧资产</div>
+    <div id="viewport"><canvas id="canvas"></canvas><div id="fieldWrap"><canvas id="fieldCanvas"></canvas></div></div>
+    <div id="hint" class="muted">A1/A2 是有符号目标场，不是严格欧氏 SDF。三维视图显示未清理的零等值面；切片显示原场值，红为负、蓝为正、浅色接近零（颜色在 ±4 细体素处饱和）。</div>
   </main>
   <script>
     const $ = id => document.getElementById(id);
     const canvas = $('canvas'), gl = canvas.getContext('webgl2', {antialias:true});
+    const fieldCanvas = $('fieldCanvas'), fieldContext = fieldCanvas.getContext('2d');
     const overlay = $('overlay');
     let rows = [], selected = -1, geometry = null, yaw = 0.5, pitch = 0.25, distance = 2.3, panX = 0, panY = 0;
+    let resolution = 128, frame = null, sliceValues = null, loadToken = 0;
     if (!gl) overlay.textContent = '此浏览器没有 WebGL 2；请启用浏览器硬件加速。';
 
     function shader(type, code) {
@@ -98,7 +122,7 @@
       for (const key of ['position','normal','triangles','lines']) if (geometry[key]) gl.deleteBuffer(geometry[key]);
       geometry = null;
     }
-    function upload(buffer) {
+    function upload(buffer, isSource) {
       if (buffer.byteLength < 8) throw Error('Mesh 数据太短');
       const view = new DataView(buffer), nv = view.getUint32(0,true), nf = view.getUint32(4,true);
       if (buffer.byteLength !== 8+12*nv+12*nf || !nv || !nf) throw Error('Mesh 数据长度无效');
@@ -122,11 +146,14 @@
       }
       dispose();
       function makeBuffer(target, values) { const b=gl.createBuffer(); gl.bindBuffer(target,b); gl.bufferData(target,values,gl.STATIC_DRAW); return b; }
+      const fitted = {center:low.map((x,k)=>(x+high[k])/2),
+                      scale:1/Math.max(...high.map((x,k)=>x-low[k]),1e-9)};
+      if (isSource || !frame) frame=fitted;
       geometry = {position:makeBuffer(gl.ARRAY_BUFFER,vertices),normal:makeBuffer(gl.ARRAY_BUFFER,normals),
         triangles:makeBuffer(gl.ELEMENT_ARRAY_BUFFER,faces),faces, count:faces.length,
-        center:low.map((x,k)=>(x+high[k])/2), scale:1/Math.max(...high.map((x,k)=>x-low[k]),1e-9),
+        center:frame.center, scale:frame.scale,
         extent:high.map((x,k)=>x-low[k])};
-      yaw=0.5; pitch=0.25; distance=2.3; panX=0; panY=0; draw();
+      draw();
     }
     function ensureLines() {
       if (!geometry || geometry.lines) return;
@@ -140,7 +167,7 @@
       geometry.lineCount=edges.length;
     }
     function draw() {
-      if (!gl) return;
+      if (!gl || $('mode').value.endsWith('slice')) return;
       const dpr=Math.min(devicePixelRatio,2), w=Math.max(1,Math.round(canvas.clientWidth*dpr)),
         h=Math.max(1,Math.round(canvas.clientHeight*dpr));
       if (canvas.width!==w||canvas.height!==h) {canvas.width=w;canvas.height=h;}
@@ -161,6 +188,24 @@
       if ($('wire').checked) {ensureLines();gl.uniform1i(uniforms.wire,1);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,geometry.lines);
         gl.drawElements(gl.LINES,geometry.lineCount,gl.UNSIGNED_INT,0);}
     }
+    function drawSlice(buffer, stage, axis, index) {
+      const view=new DataView(buffer), n=view.getUint32(0,true);
+      if (n!==resolution || buffer.byteLength!==4+4*n*n) throw Error('场切片数据长度无效');
+      const values=new Float32Array(buffer,4,n*n);
+      sliceValues=values;fieldCanvas.width=n;fieldCanvas.height=n;
+      const pixels=fieldContext.createImageData(n,n);
+      let minimum=Infinity,maximum=-Infinity;
+      for(let k=0;k<values.length;k++){
+        const s=values[k]*n;if(!Number.isFinite(s)) throw Error('场值包含非有限值');
+        minimum=Math.min(minimum,s);maximum=Math.max(maximum,s);
+        const t=Math.min(Math.abs(s)/4,1), base=[232,234,227], end=s<0?[236,100,71]:[70,145,230];
+        for(let c=0;c<3;c++) pixels.data[4*k+c]=Math.round(base[c]*(1-t)+end[c]*t);
+        pixels.data[4*k+3]=255;
+      }
+      fieldContext.putImageData(pixels,0,0);
+      const coord=((index+0.5)/n-0.5).toFixed(4);
+      overlay.textContent=`${rows[selected].name}\n${stage} 原场 ${axis.toUpperCase()}=${index}（归一化坐标 ${coord}）\n切片 s=R·field 范围：${minimum.toFixed(3)} 至 ${maximum.toFixed(3)} 细体素\n红：负值 · 蓝：正值 · 浅色：零附近；悬停查看位置与数值`;
+    }
     function renderList() {
       const query=$('search').value.toLowerCase(), filter=$('filter').value, list=$('list');list.replaceChildren();
       const shown=rows.filter(r=>(filter==='all'||(filter==='watertight'?r.watertight:r.status===filter))
@@ -170,23 +215,62 @@
         const button=document.createElement('button');button.className='item'+(row.status==='failed'?' failed':'')+(row.index===selected?' active':'');
         const title=document.createElement('strong'), detail=document.createElement('span');
         title.textContent=`${String(row.index+1).padStart(2,'0')} · ${row.name}`;
-        detail.textContent=row.status==='loaded'?`${row.faces.toLocaleString()} 面 · ${row.watertight?'闭合候选':'非闭合'} · ${row.category}`:'加载失败';
+        detail.textContent=row.status==='loaded'?`${row.faces.toLocaleString()} 面 · ${row.watertight?'闭合候选':'非闭合'}${row.target?.status==='success'?' · A1/A2 已缓存':''}`:'加载失败';
         button.append(title,detail);button.onclick=()=>select(row.index);list.append(button);
       }
     }
-    async function select(index) {
-      selected=index;renderList();const row=rows[index];dispose();draw();
-      if (row.status!=='loaded') {overlay.textContent=`${row.name}\n加载失败：${row.error}`;return;}
-      overlay.textContent=`${row.name}\n从远端加载中…`;
-      try {
-        const response=await fetch(`/mesh/${index}`);
-        if (!response.ok) throw Error(`远端加载失败：HTTP ${response.status}`);
-        const buffer=await response.arrayBuffer();if (selected!==index) return;
-        upload(buffer);
-        overlay.textContent=`${row.name}\n${row.vertices.toLocaleString()} 顶点 · ${row.faces.toLocaleString()} 面 · ${row.watertight?'闭合候选':'非闭合'}\n原坐标包围盒尺寸：${geometry.extent.map(x=>x.toPrecision(4)).join(' × ')}`;
-      } catch (error) {if (selected===index) overlay.textContent=`${row.name}\n${error.message}`;}
+    function updateModeControls() {
+      const sliced=$('mode').value.endsWith('slice');
+      canvas.style.display=sliced?'none':'block';$('fieldWrap').style.display=sliced?'flex':'none';
+      $('sliceControls').style.display=sliced?'flex':'none';
+      $('meshHint').style.display=sliced?'none':'inline';
+      $('reset').disabled=sliced;$('wire').disabled=sliced;
+    }
+    let sliceBaseOverlay='';
+    async function loadCurrent() {
+      if(selected<0)return;
+      const token=++loadToken,row=rows[selected],mode=$('mode').value;
+      updateModeControls();dispose();sliceValues=null;draw();
+      if(row.status!=='loaded'){overlay.textContent=`${row.name}\n加载失败：${row.error}`;return;}
+      if(mode!=='source'&&row.target?.status!=='success'){
+        overlay.textContent=`${row.name}\n此资产没有 A1/A2 批量缓存`;return;
+      }
+      overlay.textContent=`${row.name}\n从远端加载 ${mode}…`;
+      try{
+        const sliced=mode.endsWith('slice'),stage=mode.slice(0,2);
+        const axis=$('sliceAxis').value,index=Number($('sliceIndex').value);
+        const url=mode==='source'?`/mesh/${selected}`:
+          `/target/${selected}/${stage}/${sliced?'slice':'mesh'}`+
+          (sliced?`?axis=${axis}&index=${index}`:'');
+        const response=await fetch(url);
+        if(!response.ok)throw Error(`远端加载失败：HTTP ${response.status}`);
+        const buffer=await response.arrayBuffer();if(token!==loadToken)return;
+        if(sliced){drawSlice(buffer,stage,axis,index);sliceBaseOverlay=overlay.textContent;return;}
+        upload(buffer,mode==='source');
+        const metrics=row.target?.stages?.[stage];
+        overlay.textContent=mode==='source'?
+          `${row.name}\n输入 mesh · ${row.vertices.toLocaleString()} 顶点 / ${row.faces.toLocaleString()} 面 · ${row.watertight?'闭合候选':'非闭合'}\n原坐标包围盒尺寸：${geometry.extent.map(x=>x.toPrecision(4)).join(' × ')}`:
+          `${row.name}\n${stage} 未清理零等值面 · ${geometry.count/3} 面\nChamfer ${metrics.chamfer_l1.toPrecision(4)} · F-score 0.5% ${(100*metrics.fscore_0_005).toFixed(2)}% · 1% ${(100*metrics.fscore_0_01).toFixed(2)}%\nA1→A2 改变 ${row.target.changed_samples} 个场采样，新增 ${row.target.added_negative_samples} 个负值点`;
+      }catch(error){if(token===loadToken)overlay.textContent=`${row.name}\n${error.message}`;}
+    }
+    function select(index) {
+      selected=index;frame=null;yaw=0.5;pitch=0.25;distance=2.3;panX=0;panY=0;
+      renderList();loadCurrent();
     }
     $('search').oninput=renderList;$('filter').onchange=renderList;
+    $('mode').onchange=loadCurrent;
+    $('sliceAxis').onchange=loadCurrent;
+    $('sliceIndex').oninput=()=>{$('sliceLabel').textContent=`${$('sliceIndex').value} / ${resolution-1}`;};
+    $('sliceIndex').onchange=loadCurrent;
+    fieldCanvas.onpointermove=e=>{
+      if(!sliceValues)return;
+      const rect=fieldCanvas.getBoundingClientRect(),col=Math.min(resolution-1,Math.max(0,Math.floor((e.clientX-rect.left)*resolution/rect.width))),
+        line=Math.min(resolution-1,Math.max(0,Math.floor((e.clientY-rect.top)*resolution/rect.height)));
+      const axis=$('sliceAxis').value,other=axis==='x'?['y','z']:axis==='y'?['x','z']:['x','y'];
+      const value=sliceValues[line*resolution+col];
+      overlay.textContent=`${sliceBaseOverlay}\n${other[0]}=${line}, ${other[1]}=${col}：field=${value.toPrecision(5)}，s=${(value*resolution).toFixed(3)} 细体素`;
+    };
+    fieldCanvas.onpointerleave=()=>{if(sliceValues)overlay.textContent=sliceBaseOverlay;};
     $('reset').onclick=()=>{yaw=0.5;pitch=0.25;distance=2.3;panX=0;panY=0;draw();};
     $('wire').onchange=draw;
     let drag=null;
@@ -214,7 +298,15 @@
     };
     canvas.onwheel=e=>{e.preventDefault();distance=Math.max(0.8,Math.min(20,distance*Math.exp(e.deltaY*0.001)));draw();};
     window.onresize=draw;
-    fetch('/api/catalog').then(r=>r.json()).then(data=>{rows=data.rows;renderList();
+    fetch('/api/catalog').then(r=>r.json()).then(data=>{
+      rows=data.rows;resolution=data.target_resolution||128;
+      $('sliceIndex').max=String(resolution-1);$('sliceIndex').value=String(Math.floor(resolution/2));
+      $('sliceLabel').textContent=`${$('sliceIndex').value} / ${resolution-1}`;
+      if(data.has_targets)for(const [value,label] of [['A1-mesh','A1 零等值面'],['A2-mesh','A2 零等值面'],
+          ['A1-slice','A1 场切片'],['A2-slice','A2 场切片']]){
+        const option=document.createElement('option');option.value=value;option.textContent=label;$('mode').append(option);
+      }
+      renderList();
       const first=rows.find(r=>r.status==='loaded');if(first)select(first.index);else overlay.textContent='没有可加载资产';
     }).catch(error=>overlay.textContent=`清单加载失败：${error.message}`);
     draw();

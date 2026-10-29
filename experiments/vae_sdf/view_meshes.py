@@ -17,7 +17,7 @@ import webbrowser
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 HTML = Path(__file__).with_name("mesh_browser.html")
@@ -25,13 +25,14 @@ HTML = Path(__file__).with_name("mesh_browser.html")
 
 class RemoteSource:
     def __init__(self, host: str, remote_dir: str, remote_python: str, timeout: int,
-                 dataset: str):
+                 dataset: str, batch_root: str | None = None):
         if not host or host.startswith("-"):
             raise ValueError("SSH host must be a host name or user@host")
         self.host = host
         self.root = remote_dir.rstrip("/")
         self.python = remote_python
         self.timeout = timeout
+        self.batch_root = batch_root or f"{self.root}/g0-a1a2-r128-cpu-v1"
         if dataset not in {"balanced50", "usable50", "first50"}:
             raise ValueError("Unknown G0 dataset")
         self.manifest_name = f"manifest-{dataset}.json"
@@ -51,6 +52,9 @@ class RemoteSource:
     def json_file(self, filename: str) -> dict:
         return json.loads(self.run(["cat", f"{self.root}/{filename}"]))
 
+    def batch_summary(self) -> dict:
+        return json.loads(self.run(["cat", f"{self.batch_root}/summary.json"]))
+
     def mesh(self, index: int) -> bytes:
         library_paths = ":".join((f"{self.root}/vendor-full", f"{self.root}/vae3d", self.root))
         return self.run([
@@ -61,8 +65,23 @@ class RemoteSource:
             "--index", str(index),
         ])
 
+    def target(self, index: int, stage: str, kind: str, axis: str = "z",
+               slice_index: int = 64) -> bytes:
+        if (stage not in {"A1", "A2"} or kind not in {"mesh", "slice"}
+                or axis not in {"x", "y", "z"}):
+            raise ValueError("Invalid target request")
+        library_paths = ":".join((f"{self.root}/vendor-full", f"{self.root}/vae3d", self.root))
+        return self.run([
+            "env", f"PYTHONPATH={library_paths}",
+            f"TMPDIR={self.root}/tmp", f"XDG_CACHE_HOME={self.root}/cache",
+            self.python, "-m", "experiments.vae_sdf.remote_target",
+            "--batch-root", self.batch_root, "--index", str(index),
+            "--stage", stage, "--kind", kind, "--axis", axis,
+            "--slice-index", str(slice_index),
+        ])
 
-def catalog(manifest: dict, audit: dict) -> dict:
+
+def catalog(manifest: dict, audit: dict, batch: dict | None = None) -> dict:
     entries = manifest.get("assets", [])
     results = audit.get("assets", [])
     if not entries or len(entries) != len(results):
@@ -80,8 +99,33 @@ def catalog(manifest: dict, audit: dict) -> dict:
             "watertight": result.get("watertight_geometry"),
             "seconds": result.get("seconds"),
         })
+    target_resolution = None
+    if batch is not None:
+        paired = batch.get("assets", [])
+        if len(paired) != len(rows) or batch.get("denominator") != len(rows):
+            raise ValueError("A1/A2 batch differs from the selected manifest")
+        for index, (row, result, asset) in enumerate(zip(rows, paired, entries)):
+            if (result.get("index") != index or result.get("id") != row["id"]
+                    or result.get("source") != asset["path"]):
+                raise ValueError(f"A1/A2 batch differs at index {index}")
+            if result.get("status") == "success":
+                metrics = result["metrics"]
+                row["target"] = {
+                    "status": "success", "stages": {
+                        stage: {"chamfer_l1": metrics["stages"][stage]["chamfer_l1"],
+                                "fscore_0_005": metrics["stages"][stage]["fscore"]["0.005"]["fscore"],
+                                "fscore_0_01": metrics["stages"][stage]["fscore"]["0.01"]["fscore"],
+                                "faces": metrics["stages"][stage]["faces"]}
+                        for stage in ("A1", "A2")},
+                    "changed_samples": metrics["cache_check"]["field_changed_samples"],
+                    "added_negative_samples": metrics["cache_check"]["added_negative_samples"],
+                }
+                target_resolution = metrics["cache_check"]["resolution"]
+            else:
+                row["target"] = {"status": result.get("status", "pending")}
     return {"rows": rows, "selection": manifest.get("selection", {}),
-            "audit_resolution": audit.get("resolution")}
+            "audit_resolution": audit.get("resolution"), "target_resolution": target_resolution,
+            "has_targets": batch is not None}
 
 
 def handler_for(source: RemoteSource, data: dict):
@@ -89,9 +133,14 @@ def handler_for(source: RemoteSource, data: dict):
     def mesh(index: int) -> bytes:
         return source.mesh(index)
 
+    @lru_cache(maxsize=4)
+    def target_mesh(index: int, stage: str) -> bytes:
+        return source.target(index, stage, "mesh")
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            path = urlsplit(self.path).path
+            request = urlsplit(self.path)
+            path = request.path
             try:
                 if path == "/":
                     body, mime = HTML.read_bytes(), "text/html; charset=utf-8"
@@ -103,6 +152,30 @@ def handler_for(source: RemoteSource, data: dict):
                         self.send_error(404, "Mesh not available")
                         return
                     body, mime = mesh(index), "application/octet-stream"
+                elif path.startswith("/target/") and data["has_targets"]:
+                    parts = path.strip("/").split("/")
+                    if (len(parts) != 4 or not parts[1].isdigit()
+                            or parts[2] not in {"A1", "A2"}
+                            or parts[3] not in {"mesh", "slice"}):
+                        self.send_error(404)
+                        return
+                    index, stage, kind = int(parts[1]), parts[2], parts[3]
+                    if (index >= len(data["rows"]) or
+                            data["rows"][index].get("target", {}).get("status") != "success"):
+                        self.send_error(404, "Target not available")
+                        return
+                    if kind == "mesh":
+                        body = target_mesh(index, stage)
+                    else:
+                        query = parse_qs(request.query)
+                        axis = query.get("axis", ["z"])[0]
+                        value = query.get("index", ["64"])[0]
+                        if (axis not in {"x", "y", "z"} or not value.isdigit()
+                                or int(value) >= data["target_resolution"]):
+                            self.send_error(400, "Invalid slice")
+                            return
+                        body = source.target(index, stage, "slice", axis, int(value))
+                    mime = "application/octet-stream"
                 else:
                     self.send_error(404)
                     return
@@ -113,7 +186,7 @@ def handler_for(source: RemoteSource, data: dict):
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(body)
-            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
                 self.send_error(502, str(exc)[:500])
 
         def log_message(self, format, *args):
@@ -134,12 +207,14 @@ def main() -> int:
                         default="balanced50",
                         help="G0 manifest to browse (default: balanced50)")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--batch-root", help="Remote A1/A2 batch root for balanced50")
     args = parser.parse_args()
     if args.timeout < 1 or not 0 <= args.port <= 65535:
         parser.error("timeout must be positive and port must be in 0..65535")
     source = RemoteSource(args.host, args.remote_dir, args.remote_python, args.timeout,
-                          args.dataset)
-    data = catalog(source.json_file(source.manifest_name), source.json_file(source.audit_name))
+                          args.dataset, args.batch_root)
+    batch = source.batch_summary() if args.dataset == "balanced50" else None
+    data = catalog(source.json_file(source.manifest_name), source.json_file(source.audit_name), batch)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(source, data))
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"G0 mesh viewer: {url} — {len(data['rows'])} assets. Ctrl+C to stop.", flush=True)

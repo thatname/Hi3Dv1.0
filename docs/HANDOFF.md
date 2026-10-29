@@ -1,6 +1,8 @@
 # 会话交接：hi3d-vae-field
 
-更新日期：2026-10-29。此文件记录进度与入口，技术方案以 [v0.3](experiment-plan-v0.3.md) 为准，修改版事实以 [基线分析](modified-repo-analysis.md) 为准。
+更新日期：2026-10-30。此文件记录进度与入口，技术方案以 [v0.3](experiment-plan-v0.3.md) 为准，修改版事实以 [基线分析](modified-repo-analysis.md) 为准。
+
+阶段性总览见 [G0/G0b 进展总结](reports/g0-progress-summary-2026-10-30.md)；逐项数值和命令仍以各阶段报告为准。
 
 ## 1. 当前状态
 
@@ -12,11 +14,13 @@
 | 本次交接补充前的文档提交 | `9e76d8e`；当前 HEAD 以 `git log -1` 为准，不将固定文档哈希当作运行版本 |
 | vae3d 参考版本 | `422e79988ccda06ef0995bf7768cd05a8894a124` |
 | 方案与分析 | 已完成静态源码核查、v0.3 方案、修改版分析；v0.2 仅作历史归档 |
-| 实验代码 | 已有 G0 清单/浏览、A0 闭合与符号审计、候选欧氏有符号距离入口，以及 A1/A2 同源查询与独立阶段缓存。A3/A4、批量评测和训练适配仍未实现 |
-| 目标缓存/实验结果 | 远端 G0-prep 已有 A0 未验证候选 R32 与 A1/A2 R32/R128 单资产 smoke 缓存；A0 自动审计为 12 单体候选、8 多体需复核、30 非闭合仅从 A0 符号基准排除。尚无正式 A0 批准、完整 G0 指标或训练 checkpoint，见 [A0 审计记录](reports/g0-a0-audit-smoke-2026-10-29.md)与 [A1/A2 记录](reports/g0-a1a2-initial-smoke-2026-10-29.md) |
-| G0 准备 | 固定独立的 20 闭合候选 / 30 非闭合清单 `manifest-balanced50.json`，完整复检 50/50 可加载；原始与补样清单及失败记录均保留。选样证据见 [G0 准备记录](reports/g0-preparation-2026-10-29.md)，本地浏览入口见 [说明](g0-mesh-browser.md)。A0 自动审计与 A0/A1/A2 单资产 smoke 已做，完整 G0 尚未完成 |
-| GPU 验证 | 尚未执行本项目目标迁移、梯度、多 GPU 等价性或 2048 性能验证 |
+| 实验代码 | 已有 G0 清单/浏览、A0 闭合与符号审计及候选距离入口、A1/A2 同源查询与独立缓存、A3 几何拟合、A4 一致深度渲染拟合，以及 G0b A4 场到 Hi3D 角点的打包/回读与 MC/FlexiCubes 对照；各批量阶段均有逐资产结果和回读审计。训练适配仍未实现 |
+| 目标缓存/实验结果 | 远端 A1/A2 R128 CPU、A3 R128 GPU 30 步与 A4 R128/4096 200 步均 50/50 运行成功，见 [A1/A2](reports/g0-a1a2-batch-r128-2026-10-29.md)、[A3](reports/g0-a3-batch-r128-2026-10-30.md)、[A4](reports/g0-a4-batch-r128-render4096-2026-10-30.md) 报告。A4 相对 A3 同提取器 Chamfer 改善 39/50，但 16 个资产存在倒置穿越 cell，需带质量疑点标志。A0 自动审计为 12 单体候选、8 多体需复核、30 非闭合仅从 A0 符号基准排除；A3/A4 均保留原标志。仅有 1 个 R32 未批准 A0 候选缓存，见 [A0 审计记录](reports/g0-a0-audit-smoke-2026-10-29.md)。尚无正式 A0 真值、完整 G0 对照或训练 checkpoint |
+| G0 准备 | 固定独立的 20 闭合候选 / 30 非闭合清单 `manifest-balanced50.json`，完整复检 50/50 可加载；原始与补样清单及失败记录均保留。选样证据见 [G0 准备记录](reports/g0-preparation-2026-10-29.md)。本地[浏览器](g0-mesh-browser.md)可查看全部输入 mesh、A1/A2 零面和场切片。A1/A2/A3/A4 批量已完成；G0b 接口对照 50/50 成功，见 [G0b 报告](reports/g0b-a4-r128-interface-2026-10-30.md)。A0 正式真值及完整 G0 尚未完成 |
+| GPU 验证 | Kaolin 距离算子、nvdiffrast 栅格化的前向/梯度及 A3/A4 50 资产 GPU 拟合已实测；多 GPU 等价性、2048 性能和网络训练未验证 |
 | Git 操作约定 | 未经用户确认不创建新提交；push 由用户操作。本轮 G0 代码及文档仍在本地工作区，远端 Git 仓库未修改 |
+
+A4 环境边界补充：独立目标、源码、工具链和构建产物均在 `/data/hi3d/g0-prep/`，但最初的 `uv` 依赖安装使用默认 `/home/le.chang/.cache/uv` 缓存；后续构建已改用 G0 内的 `UV_CACHE_DIR`。未清理共享缓存，详情见 [A4 报告](reports/g0-a4-batch-r128-render4096-2026-10-30.md)。
 
 新会话先运行以下只读检查（从工程根目录执行）：
 
@@ -37,21 +41,21 @@ git branch -vv
 
 **方案建议，尚非用户逐项确认：**使用4通道场输入 encoder、调整为倍率8/latent32、采用连续 signed-tanh 输出头、先独立 VAE 后接 DiT、使用骨干热启动、首轮 B2/B4 对照。实施相关改动前结合当前用户指令确定范围，不能以“文档写了”当作已批准的最终架构。
 
-**尚缺运行信息：**训练用数据划分、权重位置、GPU 小时预算、是否必须保留旧 DiT，以及 A3/A4 的依赖/后端与资源实测。G0 的远端主机、工程目录、数据源、GPU 与磁盘已核查；不要从瞬时设备清点推断训练配额。
+**尚缺运行信息：**训练用数据划分、权重位置、GPU 小时预算、是否必须保留旧 DiT，以及 A0 的人工符号批准。A3/A4 的单卡目标生成已验证，G0 的远端主机、工程目录、数据源、GPU 与磁盘已核查；不要从瞬时设备清点推断训练配额。
 
 ## 3. 下一项可交付任务
 
-当前应继续完成 G0 表示验证，暂不改网络骨干：
+用户决定先执行 G0b，G0 的质量是否通过暂缓判断；当前 G0b 已有数值与提取器对照，暂不改网络骨干：
 
-1. 复核 20 个闭合候选的自相交、组件相交/嵌套、法向及实体语义，形成明确的 A0 人工允许子集；8 个多连通体可在复核后纳入，不预先排除。
-2. 固定 G0 的分辨率、CPU/GPU 后端、统一 raw mesh 提取器、共同支撑和评测预算；保留目前 A0/A1/A2 单资产缓存作为 smoke 证据。
-3. 在 50 个固定资产上批量运行 A1/A2，包括 30 个非闭合样本；正式 A0 仅对人工批准的子集运行。记录失败分母、时间、缓存体积及原坐标系 raw mesh 几何指标。
-4. 实现并验证 A3 几何拟合、A4 渲染拟合的独立入口与依赖，再用相同资产/协议完成 A1–A4 对照。
-5. 输出完整 G0 报告；之后进行 G0b 中心点/角点适配，再进入梯度和训练任务。原模型流式一致性 G0c 可独立验证，新输出头实现后需重测。
+1. 复核 20 个闭合候选的自相交、组件相交/嵌套、法向及实体语义，形成明确的 A0 人工允许子集；8 个多连通体可在复核后纳入，不预先排除。其疑点标志在 A3/A4 中保留，不影响两阶段纳入。
+2. 保留已完成的 R128 CPU A1/A2、R128 GPU A3 与 R128/4096 GPU A4 批量基线；A2_classic→A3 与 A3_classic→A4 分别用同一提取器配对评测，不能与原 A1/A2 Lewiner 指标直接混用。
+3. 只对人工批准的闭合子集运行正式 A0；30 个非闭合样本继续参与 A1–A4 表示验证。
+4. 对 A4 的 16 个倒置穿越单元资产、11 个 Chamfer 回退资产和 A3 回退/离群资产做可视复核；决定 A4 是否需要硬约束修订，另建协议与缓存。
+5. G0b 已验证 A4 场的中心点/角点无损适配和相同 MC 的精确一致性。FlexiCubes 相对 MC 的 Chamfer 在 41/50 样本增大，先复核 [G0b 报告](reports/g0b-a4-r128-interface-2026-10-30.md) 所列重点编号，再决定修接口或保持 classic MC。完整 G0 质量结论和训练放行仍待定。原模型流式一致性 G0c 可独立验证，新输出头实现后需重测。
 
-现有 A0/A1/A2 入口和小样本验证见本文件首表及三份阶段报告；A3/A4 和批量评测尚无可运行入口。现有 vae3d `convert` 不支持直接用 render_steps=0 跳过渲染，不能写出未实现的命令。
+现有 A0/A1/A2/A3/A4 入口、小样本验证及批量评测见本文件首表与阶段报告。现有 vae3d `convert` 不支持直接用 render_steps=0 跳过渲染；A3/A4 已使用独立阶段入口实现。
 
-已完成的入口验收与 CPU 数值对照见阶段报告；正式 G0 的几何指标阈值、分辨率和预算须在批量运行前锁定。当前没有完整 G0 质量结论。
+已完成的入口验收、CPU 数值对照、R128 A1/A2/A3、R128/4096 A4 与 G0b 固定协议见阶段报告；A0 正式真值与跨阶段统一对照仍待完成。A4 运行 50/50 成功，但 16 个资产有倒置穿越 cell；G0b 接口数值验收通过，FlexiCubes 路径需进一步复核；当前没有完整 G0 质量结论。
 
 ## 4. vae3d 获取与依赖
 
@@ -87,13 +91,13 @@ git -C /Users/changle/code/3dgen/vae3d archive --format=tar   --output=/tmp/vae3
 |---|---|
 | 主机/调度环境、工作目录 | 2026-10-29 经 SSH 核对：`le.chang@124.156.97.173`，`/data/hi3d/hi3d-vae-field`；调度策略未确认 |
 | GPU/显存/数量，CPU/RAM/空闲磁盘 | `nvidia-smi` 显示 8× NVIDIA H20-3e、每卡 143771 MiB；`df -h /data/hi3d` 曾显示剩余 415G；CPU/RAM 未系统测量。此为瞬时状态，不代表训练配额 |
-| OS、driver、CUDA、PyTorch 与依赖版本 | G0 使用 Python 3.10.22、torch 2.5.0+cu124、独立 Open3D 0.18.0；完整训练/A3/A4 依赖组合未验证 |
+| OS、driver、CUDA、PyTorch 与依赖版本 | G0 使用 Python 3.10.22、torch 2.5.0+cu124、独立 Open3D 0.18.0；A3 在独立目录使用 Kaolin 0.18.0、Warp 1.18.0；A4 在独立目录使用 nvdiffrast 0.4.0、临时 CUDA 12.4 nvcc。完整训练依赖组合未验证 |
 | mesh manifest、训练/验证/测试划分 | G0 固定 `/data/hi3d/g0-prep/manifest-balanced50.json`，50/50 可加载；正式训练/验证/测试划分未建立 |
 | Hi3D 权重路径及哈希 | 未记录 |
-| vae3d 源码/预处理缓存路径 | 固定源码 `/data/hi3d/g0-prep/vae3d`；A0 候选及 A1/A2 smoke 缓存在 `/data/hi3d/g0-prep/targets-*`，精确路径见阶段报告 |
-| 输出根目录、run_id、配额/最长时长 | G0 smoke 在 `/data/hi3d/g0-prep/`；正式批量 run_id、配额/最长时长未确定 |
-| 射线/距离/渲染后端 | A1/A2 的 CPU 射线与 CPU 距离、A0 的 Open3D CPU 路径已小样本验证；GPU/渲染后端未验证，Linux 不直接照搬 DXR |
-| 运行命令与断点恢复命令 | A0/A1/A2 实际小样本命令见阶段报告；批量与断点恢复命令待实现/固定 |
+| vae3d 源码/预处理缓存路径 | 固定源码 `/data/hi3d/g0-prep/vae3d`；A1/A2 批量 `/data/hi3d/g0-prep/g0-a1a2-r128-cpu-v1/`，A3 批量 `/data/hi3d/g0-prep/g0-a3-r128-gpu-v1/`，A4 批量 `/data/hi3d/g0-prep/g0-a4-r128-render4096-v1/`，G0b 批量 `/data/hi3d/g0-prep/g0b-a4-r128-v1/`；A0 候选及 smoke 路径见阶段报告 |
+| 输出根目录、run_id、配额/最长时长 | A1/A2、A3、A4 的 run_id 见上一行；A4 逐资产时间合计约 470 秒，非训练配额估计。A0 正式预算未确定 |
+| 射线/距离/渲染后端 | A1/A2 使用 CPU 射线与距离，A0 候选仅 Open3D CPU；A3 使用 Kaolin GPU 距离与梯度；A4 使用 nvdiffrast CUDA 可微渲染；Linux 未照搬 DXR |
+| 运行命令与断点恢复命令 | A1/A2、A3、A4 分别见各阶段报告；均逐资产记录和恢复。A0 正式批量与断点恢复待实现 |
 
 首轮离线生成目标后再训练。记录标签拟合和网络训练两类成本；4096 渲染标签拟合不是一次普通 SDF 查询。原预处理内部有 cuda:0 假设；多卡映射和进程配置须实测。
 
@@ -104,8 +108,9 @@ git -C /Users/changle/code/3dgen/vae3d archive --format=tar   --output=/tmp/vae3
 | 静态源码分析 | 调用链、数据格式、流式 inference_mode 等已核对，见方案与分析 | 不证明生成质量提升 |
 | 上次迁移检查 | 文件内容/Git历史保留、Python AST 检查曾通过 | 不证明依赖可安装或 GPU 可运行 |
 | 本轮文档检查 | 检查相对链接与 `git diff --check` | 不等于实验测试 |
-| G0 准备与小样本 | 固定 50 个可加载 mesh；A0 自动审计及未批准候选缓存；A1/A2 CPU 单资产数值对照，见三份阶段报告 | 不代表完整 G0 质量或 A0 人工批准 |
-| 完整 G0/G0b/G0c/G1–G4 | 均未完成 | README 性能声明不能作为本项目实测 |
+| G0 准备与 A1/A2/A3/A4 批量 | 固定 50 个可加载 mesh；A0 自动审计及未批准候选缓存；A1/A2 CPU、A3/A4 GPU 均 50/50；A4 回读审计、held-out 渲染与同提取器指标见 [报告](reports/g0-a4-batch-r128-render4096-2026-10-30.md) | 不代表完整 G0 质量、A0 人工批准、网络训练收益或完整 GPU 峰值显存；A4 的 16 个倒置穿越资产需复核 |
+| G0b 接口与提取器对照 | 固定 50 个 A4 场全数回读，最大共享点误差 `4.77e-7`，相同 MC 网格精确一致；FlexiCubes 相对 MC 对原 mesh 的 Chamfer 41/50 增大，见 [G0b 报告](reports/g0b-a4-r128-interface-2026-10-30.md) | 不代表 FlexiCubes 几何质量放行、A0 人工批准或网络训练收益 |
+| 完整 G0/G0c/G1–G4 | 均未完成 | README 性能声明不能作为本项目实测 |
 
 每完成一个阶段，记录：日期、实验代码 commit、两套源码版本、resolved_config、数据/权重哈希、环境、执行命令、产物位置、指标、失败清单和下一步。可在 docs/reports/ 放轻量报告并引用外部结果目录；模型权重和大型缓存不直接加入普通 Git。
 
@@ -118,4 +123,4 @@ git -C /Users/changle/code/3dgen/vae3d archive --format=tar   --output=/tmp/vae3
 - 本地和远端 `/data/hi3d/hi3d-vae-field` 均为 `main`、HEAD `9c72ea6bba8f345e6f7770325298da57ec9bfe25`，工作区干净，跟踪 `origin/main`。本地另有名为 `github` 的 remote；远端仅见 `origin`。未执行 fetch、push 或代码修改。
 - 本地参考仓库 `/Users/changle/code/3dgen/vae3d` 为 `422e79988ccda06ef0995bf7768cd05a8894a124`，仅 `.vscode/` 未跟踪。当前 Hi3D 工程中未发现 `experiments/vae_sdf` 或训练入口；`SparconvVAE` 仍只有 decoder。
 - 只读核对命令：本地 `git status --short --branch`、`git rev-parse HEAD`、`git remote -v`、`git log -5 --oneline`、`rg --files` 与相关源码 `sed`；远端通过 SSH 执行 `git status --short --branch`、`git rev-parse HEAD`、`git remote -v`、`nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader`、`df -h /data/hi3d`、目录存在性 `ls -ld`。上述均属源码核查/环境清点，没有 GPU 训练或质量实测。
-- 当时的下一步是独立目标生成入口与 G0；现已完成 G0 选样、A0 审计和 A1/A2 单资产 smoke，剩余任务见第 3 节。
+- 当时的下一步是独立目标生成入口与 G0；现已完成 G0 选样、A0 审计和 A1/A2/A3/A4 50 资产批量基线，剩余任务见第 3 节。
