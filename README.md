@@ -2,9 +2,10 @@
 
 基于 Hi3Dv1.0-modified 的 3D VAE 场表示实验工程。当前保留修改版推理实现，训练适配尚未实施。
 
+- [新会话交接与下一步](docs/HANDOFF.md)
 - [当前实验方案 v0.3](docs/experiment-plan-v0.3.md)
 - [修改版基线分析](docs/modified-repo-analysis.md)
-- [v0.2 归档](Hi3D-3DVAE-SDF-experiment-plan-v0.2-2026-10-29.md)
+- [v0.2 归档](docs/Hi3D-3DVAE-SDF-experiment-plan-v0.2-2026-10-29.md)
 
 本地工作目录：`/Users/changle/code/3dgen/hi3d-vae-field`。下方为继承的上游推理文档；其中原仓库 clone 步骤只获取官方原版，不能替代本实验工程。已在本目录工作时跳过 clone/cd，继续安装步骤。
 
