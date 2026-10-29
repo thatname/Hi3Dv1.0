@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>G0 · Mesh 浏览</title>
+  <style>
+    :root { color-scheme: dark; font: 14px system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #10151d; color: #e6edf7; display: flex; height: 100vh; }
+    aside { width: 340px; min-width: 250px; display: flex; flex-direction: column; border-right: 1px solid #2d3848; }
+    header { padding: 16px; border-bottom: 1px solid #2d3848; }
+    h1 { font-size: 18px; margin: 0 0 6px; }
+    .muted { color: #a5b2c5; font-size: 12px; line-height: 1.45; }
+    input, select, button { background: #1c2634; color: #e6edf7; border: 1px solid #45546b; border-radius: 6px; padding: 8px; }
+    input, select { width: 100%; margin-top: 10px; }
+    button { cursor: pointer; }
+    #list { overflow: auto; flex: 1; }
+    .item { width: 100%; text-align: left; border: 0; border-bottom: 1px solid #25303f; border-radius: 0; padding: 10px 14px; background: transparent; }
+    .item:hover, .item.active { background: #26384e; }
+    .item strong { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item span { display: block; color: #a5b2c5; font-size: 11px; margin-top: 3px; }
+    .item.failed span { color: #f2a2a2; }
+    main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    #toolbar { display: flex; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid #2d3848; }
+    #toolbar label { display: flex; gap: 6px; align-items: center; }
+    #toolbar input { width: auto; margin: 0; }
+    #viewport { flex: 1; position: relative; min-height: 0; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    #overlay { position: absolute; left: 16px; top: 16px; max-width: min(680px, calc(100% - 32px));
+               padding: 10px 12px; background: #111a27d9; border: 1px solid #334359; border-radius: 8px;
+               overflow-wrap: anywhere; white-space: pre-line; pointer-events: none; line-height: 1.5; }
+    #hint { padding: 10px 16px; border-top: 1px solid #2d3848; }
+    @media (max-width: 740px) { aside { width: 220px; min-width: 180px; } #toolbar { flex-wrap: wrap; } }
+  </style>
+</head>
+<body>
+  <aside>
+    <header>
+      <h1>G0 · 远端 Mesh</h1>
+      <div id="count" class="muted">加载清单中…</div>
+      <input id="search" type="search" placeholder="搜索文件名或编号">
+      <select id="filter"><option value="all">全部</option><option value="loaded">可加载</option>
+        <option value="failed">失败</option><option value="watertight">闭合候选</option></select>
+    </header>
+    <div id="list"></div>
+  </aside>
+  <main>
+    <div id="toolbar"><button id="reset">重置视角</button><label><input id="wire" type="checkbox">线框</label>
+      <span class="muted">左键拖动旋转 · 中键拖动平移 · 滚轮缩放</span></div>
+    <div id="viewport"><canvas id="canvas"></canvas><div id="overlay">选择左侧资产</div></div>
+    <div id="hint" class="muted">显示时自动居中缩放；源文件不修改。闭合性只作候选判断。缺少外部 .bin 的 glTF 无法显示几何。</div>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const canvas = $('canvas'), gl = canvas.getContext('webgl2', {antialias:true});
+    const overlay = $('overlay');
+    let rows = [], selected = -1, geometry = null, yaw = 0.5, pitch = 0.25, distance = 2.3, panX = 0, panY = 0;
+    if (!gl) overlay.textContent = '此浏览器没有 WebGL 2；请启用浏览器硬件加速。';
+
+    function shader(type, code) {
+      const obj = gl.createShader(type); gl.shaderSource(obj, code); gl.compileShader(obj);
+      if (!gl.getShaderParameter(obj, gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(obj));
+      return obj;
+    }
+    let program, uniforms;
+    if (gl) {
+      program = gl.createProgram();
+      gl.attachShader(program, shader(gl.VERTEX_SHADER, `#version 300 es
+        layout(location=0) in vec3 position; layout(location=1) in vec3 normal;
+        uniform mat4 projection; uniform vec3 center; uniform float scale;
+        uniform float yaw; uniform float pitch; uniform float distance; uniform vec2 pan;
+        out vec3 vNormal;
+        void main() {
+          vec3 p=(position-center)*scale;
+          float cy=cos(yaw),sy=sin(yaw),cp=cos(pitch),sp=sin(pitch);
+          vec3 r=vec3(cy*p.x+sy*p.z,p.y,-sy*p.x+cy*p.z);
+          vec3 v=vec3(r.x+pan.x,cp*r.y-sp*r.z+pan.y,sp*r.y+cp*r.z-distance);
+          vec3 n=vec3(cy*normal.x+sy*normal.z,normal.y,-sy*normal.x+cy*normal.z);
+          vNormal=vec3(n.x,cp*n.y-sp*n.z,sp*n.y+cp*n.z);
+          gl_Position=projection*vec4(v,1.0);
+        }`));
+      gl.attachShader(program, shader(gl.FRAGMENT_SHADER, `#version 300 es
+        precision highp float; in vec3 vNormal; uniform bool wire; out vec4 color;
+        void main() {
+          float light=0.28+0.72*abs(dot(normalize(vNormal),normalize(vec3(0.35,0.7,0.6))));
+          color=wire?vec4(0.08,0.15,0.22,1.0):vec4(vec3(0.44,0.72,0.91)*light,1.0);
+        }`));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(program));
+      uniforms = Object.fromEntries(['projection','center','scale','yaw','pitch','distance','pan','wire']
+        .map(name => [name,gl.getUniformLocation(program,name)]));
+      gl.enable(gl.DEPTH_TEST);
+    }
+
+    function dispose() {
+      if (!gl || !geometry) return;
+      for (const key of ['position','normal','triangles','lines']) if (geometry[key]) gl.deleteBuffer(geometry[key]);
+      geometry = null;
+    }
+    function upload(buffer) {
+      if (buffer.byteLength < 8) throw Error('Mesh 数据太短');
+      const view = new DataView(buffer), nv = view.getUint32(0,true), nf = view.getUint32(4,true);
+      if (buffer.byteLength !== 8+12*nv+12*nf || !nv || !nf) throw Error('Mesh 数据长度无效');
+      const vertices = new Float32Array(buffer,8,nv*3), faces = new Uint32Array(buffer,8+12*nv,nf*3);
+      const normals = new Float32Array(nv*3), low=[Infinity,Infinity,Infinity], high=[-Infinity,-Infinity,-Infinity];
+      for (let i=0;i<nv;i++) for (let k=0;k<3;k++) {
+        const x=vertices[3*i+k]; if (!Number.isFinite(x)) throw Error('Mesh 坐标含非有限值');
+        low[k]=Math.min(low[k],x); high[k]=Math.max(high[k],x);
+      }
+      for (let i=0;i<faces.length;i+=3) {
+        const a=faces[i],b=faces[i+1],c=faces[i+2];
+        if (a>=nv||b>=nv||c>=nv) throw Error('Mesh 面索引越界');
+        const ax=vertices[3*b]-vertices[3*a],ay=vertices[3*b+1]-vertices[3*a+1],az=vertices[3*b+2]-vertices[3*a+2];
+        const bx=vertices[3*c]-vertices[3*a],by=vertices[3*c+1]-vertices[3*a+1],bz=vertices[3*c+2]-vertices[3*a+2];
+        const n=[ay*bz-az*by,az*bx-ax*bz,ax*by-ay*bx];
+        for (const j of [a,b,c]) for (let k=0;k<3;k++) normals[3*j+k]+=n[k];
+      }
+      for (let i=0;i<nv;i++) {
+        const j=3*i, len=Math.hypot(normals[j],normals[j+1],normals[j+2])||1;
+        normals[j]/=len; normals[j+1]/=len; normals[j+2]/=len;
+      }
+      dispose();
+      function makeBuffer(target, values) { const b=gl.createBuffer(); gl.bindBuffer(target,b); gl.bufferData(target,values,gl.STATIC_DRAW); return b; }
+      geometry = {position:makeBuffer(gl.ARRAY_BUFFER,vertices),normal:makeBuffer(gl.ARRAY_BUFFER,normals),
+        triangles:makeBuffer(gl.ELEMENT_ARRAY_BUFFER,faces),faces, count:faces.length,
+        center:low.map((x,k)=>(x+high[k])/2), scale:1/Math.max(...high.map((x,k)=>x-low[k]),1e-9),
+        extent:high.map((x,k)=>x-low[k])};
+      yaw=0.5; pitch=0.25; distance=2.3; panX=0; panY=0; draw();
+    }
+    function ensureLines() {
+      if (!geometry || geometry.lines) return;
+      const faces=geometry.faces, edges=new Uint32Array(faces.length*2);
+      for (let i=0;i<faces.length;i+=3) {
+        const j=2*i; edges[j]=faces[i];edges[j+1]=faces[i+1];
+        edges[j+2]=faces[i+1];edges[j+3]=faces[i+2];edges[j+4]=faces[i+2];edges[j+5]=faces[i];
+      }
+      geometry.lines=gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,geometry.lines);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,edges,gl.STATIC_DRAW);
+      geometry.lineCount=edges.length;
+    }
+    function draw() {
+      if (!gl) return;
+      const dpr=Math.min(devicePixelRatio,2), w=Math.max(1,Math.round(canvas.clientWidth*dpr)),
+        h=Math.max(1,Math.round(canvas.clientHeight*dpr));
+      if (canvas.width!==w||canvas.height!==h) {canvas.width=w;canvas.height=h;}
+      gl.viewport(0,0,w,h); gl.clearColor(0.055,0.075,0.11,1); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+      if (!geometry) return;
+      const f=1/Math.tan(Math.PI/8), near=0.01, far=100;
+      const projection=new Float32Array([f*h/w,0,0,0, 0,f,0,0, 0,0,(far+near)/(near-far),-1,
+        0,0,2*far*near/(near-far),0]);
+      gl.useProgram(program); gl.uniformMatrix4fv(uniforms.projection,false,projection);
+      gl.uniform3fv(uniforms.center,geometry.center); gl.uniform1f(uniforms.scale,geometry.scale);
+      gl.uniform1f(uniforms.yaw,yaw);gl.uniform1f(uniforms.pitch,pitch);gl.uniform1f(uniforms.distance,distance);
+      gl.uniform2f(uniforms.pan,panX,panY);
+      gl.bindBuffer(gl.ARRAY_BUFFER,geometry.position);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
+      gl.bindBuffer(gl.ARRAY_BUFFER,geometry.normal);gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,3,gl.FLOAT,false,0,0);
+      gl.uniform1i(uniforms.wire,0);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,geometry.triangles);
+      gl.enable(gl.POLYGON_OFFSET_FILL);gl.polygonOffset(1,1);gl.drawElements(gl.TRIANGLES,geometry.count,gl.UNSIGNED_INT,0);
+      gl.disable(gl.POLYGON_OFFSET_FILL);
+      if ($('wire').checked) {ensureLines();gl.uniform1i(uniforms.wire,1);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,geometry.lines);
+        gl.drawElements(gl.LINES,geometry.lineCount,gl.UNSIGNED_INT,0);}
+    }
+    function renderList() {
+      const query=$('search').value.toLowerCase(), filter=$('filter').value, list=$('list');list.replaceChildren();
+      const shown=rows.filter(r=>(filter==='all'||(filter==='watertight'?r.watertight:r.status===filter))
+        &&(r.name.toLowerCase().includes(query)||String(r.index+1).includes(query)));
+      $('count').textContent=`${shown.length} / ${rows.length} 个资产 · ${rows.filter(r=>r.status==='loaded').length} 个可加载`;
+      for (const row of shown) {
+        const button=document.createElement('button');button.className='item'+(row.status==='failed'?' failed':'')+(row.index===selected?' active':'');
+        const title=document.createElement('strong'), detail=document.createElement('span');
+        title.textContent=`${String(row.index+1).padStart(2,'0')} · ${row.name}`;
+        detail.textContent=row.status==='loaded'?`${row.faces.toLocaleString()} 面 · ${row.watertight?'闭合候选':'非闭合'} · ${row.category}`:'加载失败';
+        button.append(title,detail);button.onclick=()=>select(row.index);list.append(button);
+      }
+    }
+    async function select(index) {
+      selected=index;renderList();const row=rows[index];dispose();draw();
+      if (row.status!=='loaded') {overlay.textContent=`${row.name}\n加载失败：${row.error}`;return;}
+      overlay.textContent=`${row.name}\n从远端加载中…`;
+      try {
+        const response=await fetch(`/mesh/${index}`);
+        if (!response.ok) throw Error(`远端加载失败：HTTP ${response.status}`);
+        const buffer=await response.arrayBuffer();if (selected!==index) return;
+        upload(buffer);
+        overlay.textContent=`${row.name}\n${row.vertices.toLocaleString()} 顶点 · ${row.faces.toLocaleString()} 面 · ${row.watertight?'闭合候选':'非闭合'}\n原坐标包围盒尺寸：${geometry.extent.map(x=>x.toPrecision(4)).join(' × ')}`;
+      } catch (error) {if (selected===index) overlay.textContent=`${row.name}\n${error.message}`;}
+    }
+    $('search').oninput=renderList;$('filter').onchange=renderList;
+    $('reset').onclick=()=>{yaw=0.5;pitch=0.25;distance=2.3;panX=0;panY=0;draw();};
+    $('wire').onchange=draw;
+    let drag=null;
+    canvas.onpointerdown=e=>{
+      if (e.button!==0&&e.button!==1) return;
+      e.preventDefault();drag={id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY};
+      canvas.setPointerCapture(e.pointerId);
+    };
+    canvas.onpointerup=e=>{if (drag?.id===e.pointerId) drag=null;};
+    canvas.onpointercancel=e=>{if (drag?.id===e.pointerId) drag=null;};
+    canvas.onlostpointercapture=()=>drag=null;
+    canvas.onauxclick=e=>{if (e.button===1)e.preventDefault();};
+    canvas.onpointermove=e=>{
+      if (!drag||drag.id!==e.pointerId) return;
+      const held=drag.button===1?4:1;
+      if (!(e.buttons&held)){drag=null;return;}
+      const dx=e.clientX-drag.x,dy=e.clientY-drag.y;
+      if (drag.button===1){
+        const unitsPerPixel=2*distance*Math.tan(Math.PI/8)/Math.max(canvas.clientHeight,1);
+        panX+=dx*unitsPerPixel;panY-=dy*unitsPerPixel;
+      }else{
+        yaw+=dx*0.008;pitch=Math.max(-1.5,Math.min(1.5,pitch+dy*0.008));
+      }
+      drag.x=e.clientX;drag.y=e.clientY;draw();
+    };
+    canvas.onwheel=e=>{e.preventDefault();distance=Math.max(0.8,Math.min(20,distance*Math.exp(e.deltaY*0.001)));draw();};
+    window.onresize=draw;
+    fetch('/api/catalog').then(r=>r.json()).then(data=>{rows=data.rows;renderList();
+      const first=rows.find(r=>r.status==='loaded');if(first)select(first.index);else overlay.textContent='没有可加载资产';
+    }).catch(error=>overlay.textContent=`清单加载失败：${error.message}`);
+    draw();
+  </script>
+</body>
+</html>

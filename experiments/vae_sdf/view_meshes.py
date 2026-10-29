@@ -1,0 +1,158 @@
+"""Browse the remote G0 manifest in a local WebGL page, without training.
+
+Example:
+  python3 -m experiments.vae_sdf.view_meshes
+
+The server binds only to 127.0.0.1. Meshes are loaded on demand through SSH
+using the fixed manifest and audit in /data/hi3d/g0-prep.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shlex
+import subprocess
+import webbrowser
+from functools import lru_cache
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+HTML = Path(__file__).with_name("mesh_browser.html")
+
+
+class RemoteSource:
+    def __init__(self, host: str, remote_dir: str, remote_python: str, timeout: int,
+                 dataset: str):
+        if not host or host.startswith("-"):
+            raise ValueError("SSH host must be a host name or user@host")
+        self.host = host
+        self.root = remote_dir.rstrip("/")
+        self.python = remote_python
+        self.timeout = timeout
+        if dataset not in {"balanced50", "usable50", "first50"}:
+            raise ValueError("Unknown G0 dataset")
+        self.manifest_name = f"manifest-{dataset}.json"
+        self.audit_name = f"mesh-load-{dataset}.json"
+
+    def run(self, command: list[str]) -> bytes:
+        result = subprocess.run(
+            ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+             self.host, shlex.join(command)],
+            capture_output=True, timeout=self.timeout, check=False,
+        )
+        if result.returncode:
+            detail = result.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(f"Remote command failed ({result.returncode}): {detail[:500]}")
+        return result.stdout
+
+    def json_file(self, filename: str) -> dict:
+        return json.loads(self.run(["cat", f"{self.root}/{filename}"]))
+
+    def mesh(self, index: int) -> bytes:
+        library_paths = ":".join((f"{self.root}/vendor-full", f"{self.root}/vae3d", self.root))
+        return self.run([
+            "env", f"PYTHONPATH={library_paths}", self.python,
+            "-m", "experiments.vae_sdf.remote_mesh",
+            "--manifest", f"{self.root}/{self.manifest_name}",
+            "--audit", f"{self.root}/{self.audit_name}",
+            "--index", str(index),
+        ])
+
+
+def catalog(manifest: dict, audit: dict) -> dict:
+    entries = manifest.get("assets", [])
+    results = audit.get("assets", [])
+    if not entries or len(entries) != len(results):
+        raise ValueError("Manifest and mesh audit have different asset counts")
+    rows = []
+    for index, (asset, result) in enumerate(zip(entries, results)):
+        if (result.get("index") != index or result.get("id") != asset.get("id")
+                or result.get("path") != asset.get("path")):
+            raise ValueError(f"Manifest and mesh audit differ at index {index}")
+        rows.append({
+            "index": index, "id": asset["id"], "name": Path(asset["path"]).name,
+            "category": asset.get("category", "unclassified"),
+            "status": result["status"], "error": result.get("error"),
+            "faces": result.get("faces"), "vertices": result.get("vertices"),
+            "watertight": result.get("watertight_geometry"),
+            "seconds": result.get("seconds"),
+        })
+    return {"rows": rows, "selection": manifest.get("selection", {}),
+            "audit_resolution": audit.get("resolution")}
+
+
+def handler_for(source: RemoteSource, data: dict):
+    @lru_cache(maxsize=2)
+    def mesh(index: int) -> bytes:
+        return source.mesh(index)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = urlsplit(self.path).path
+            try:
+                if path == "/":
+                    body, mime = HTML.read_bytes(), "text/html; charset=utf-8"
+                elif path == "/api/catalog":
+                    body, mime = json.dumps(data, ensure_ascii=False).encode(), "application/json"
+                elif path.startswith("/mesh/") and path[6:].isdigit():
+                    index = int(path[6:])
+                    if index >= len(data["rows"]) or data["rows"][index]["status"] != "loaded":
+                        self.send_error(404, "Mesh not available")
+                        return
+                    body, mime = mesh(index), "application/octet-stream"
+                else:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(body)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                self.send_error(502, str(exc)[:500])
+
+        def log_message(self, format, *args):
+            if len(args) >= 2 and str(args[1]) != "200":
+                super().log_message(format, *args)
+
+    return Handler
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="le.chang@124.156.97.173")
+    parser.add_argument("--remote-dir", default="/data/hi3d/g0-prep")
+    parser.add_argument("--remote-python", default="/data/hi3d/hi3d-validation/.venv/bin/python")
+    parser.add_argument("--port", type=int, default=0, help="Local port; 0 picks a free port")
+    parser.add_argument("--timeout", type=int, default=180, help="SSH mesh load timeout in seconds")
+    parser.add_argument("--dataset", choices=("balanced50", "usable50", "first50"),
+                        default="balanced50",
+                        help="G0 manifest to browse (default: balanced50)")
+    parser.add_argument("--no-browser", action="store_true")
+    args = parser.parse_args()
+    if args.timeout < 1 or not 0 <= args.port <= 65535:
+        parser.error("timeout must be positive and port must be in 0..65535")
+    source = RemoteSource(args.host, args.remote_dir, args.remote_python, args.timeout,
+                          args.dataset)
+    data = catalog(source.json_file(source.manifest_name), source.json_file(source.audit_name))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(source, data))
+    url = f"http://127.0.0.1:{server.server_port}/"
+    print(f"G0 mesh viewer: {url} — {len(data['rows'])} assets. Ctrl+C to stop.", flush=True)
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
