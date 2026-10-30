@@ -22,6 +22,7 @@ from vae3d.geometry import validity_loss
 from .g0b_field_adapter import HI3D_FROM_VAE, VAE_FROM_HI3D, pack_target
 from .g1_model import G1VAE, _rows
 from .g1_split import check_split
+from .g1_targets import ROUTE, target_rows
 
 
 def sha256(path: Path) -> str:
@@ -54,9 +55,13 @@ def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, devic
     if row["index"] != index or row["id"] != asset["id"] or row["status"] != "success":
         raise ValueError("A4 summary and fixed manifest disagree")
     cache = Path(row["cache"])
-    config = json.loads((cache / "resolved_config.json").read_text())
+    config = json.loads((Path(row.get("config_root", cache)) / "resolved_config.json").read_text())
     if (config["asset_id"] != asset["id"] or config["manifest_sha256"] != manifest_hash
-            or config["resolution"] != 128 or config["sampling_offset"] != 0.5):
+            or config["resolution"] != 128 or config["sampling_offset"] != 0.5
+            or (row.get("route_id") and (config.get("route_id") != ROUTE
+                or config.get("extractor") != "flexicubes"
+                or config.get("normal_mode") != "smooth"
+                or config.get("source_sha256") != asset["sha256"]))):
         raise ValueError("A4 target provenance differs from G1 protocol")
     with np.load(cache / "target.npz", allow_pickle=False) as target:
         coords = np.asarray(target["coords"], np.int32)
@@ -65,6 +70,11 @@ def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, devic
         indices = np.asarray(target["cell_indices"], np.int64)
         resolution = int(target["resolution"])
         phase = float(target["sampling_offset"])
+        if row.get("route_id") and (str(target["stage"]) != "A4"
+                or str(target["route_id"]) != ROUTE
+                or str(target["field_units"]) != "fine_voxel"
+                or str(target["delta_units"]) != "fine_voxel"):
+            raise ValueError("Four-route A4 target metadata differs from G1 protocol")
     if resolution != 128 or phase != 0.5 or np.max(np.abs(features[:, 1:])) > .50001:
         raise ValueError("A4 target resolution, phase, or voxel delta is invalid")
     pack_target(coords, features, cells, indices, resolution)
@@ -73,8 +83,10 @@ def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, devic
     weight = (1 / counts[hi_indices]).astype(np.float32)
     return {
         "index": index, "id": asset["id"], "cache": str(cache),
-        "target_sha256": sha256(cache / "target.npz"), "a0_status": row["a0_status"],
-        "a0_concerns": row["a0_concerns"],
+        "route_id": row.get("route_id", "legacy_a4"),
+        "target_sha256": sha256(cache / "target.npz"),
+        "a0_status": config.get("a0_status", row.get("a0_status")),
+        "a0_concerns": config.get("a0_concerns", row.get("a0_concerns")),
         "inverted_crossing_cells": row["audit"]["grid_quality"]["inverted_crossing_cells"],
         "coords": torch.as_tensor(coords, device=device),
         "features": torch.as_tensor(features, device=device),
@@ -108,7 +120,9 @@ def cell_validity(delta: torch.Tensor, chunk: int = 65536) -> torch.Tensor:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest", type=Path, required=True)
-    p.add_argument("--a4-summary", type=Path, required=True)
+    targets = p.add_mutually_exclusive_group(required=True)
+    targets.add_argument("--a4-summary", type=Path, help="Historical single-route A4 batch")
+    targets.add_argument("--paired-summary", type=Path, help="Fixed four-route v5 paired summary")
     p.add_argument("--weights", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--resume", type=Path, help="Exact model/optimizer continuation from a G1 checkpoint")
@@ -140,9 +154,13 @@ def main() -> int:
     manifest_bytes = args.manifest.read_bytes()
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     manifest = json.loads(manifest_bytes)
-    rows = json.loads(args.a4_summary.read_text())["assets"]
-    if len(manifest["assets"]) != 50 or len(rows) != 50:
-        raise ValueError("G1 requires the fixed balanced-50 A4 batch")
+    summary_path = args.paired_summary or args.a4_summary
+    four_route = args.paired_summary is not None
+    if four_route and args.output.resolve().is_relative_to(summary_path.resolve().parent.parent):
+        p.error("Four-route G1 output must be outside the G0 preparation directory")
+    rows = target_rows(summary_path, manifest, four_route=four_route)
+    training_schema = "g1_four_route_v1" if four_route else "g1_a4_overfit_v2"
+    summary_hash_key = "paired_summary_sha256" if four_route else "a4_summary_sha256"
     split_hash = check_split(args.split, manifest, manifest_hash, "train", args.indices) if args.split else None
     assets = [load_asset(i, manifest, rows, manifest_hash, device) for i in args.indices]
     pretrained = load_sparconv_vae(args.weights, device=device)
@@ -159,8 +177,8 @@ def main() -> int:
         state = torch.load(args.resume, map_location=device, weights_only=False)
         old = state["config"]
         expected = {
-            "schema": "g1_a4_overfit_v2", "indices": args.indices,
-            "manifest_sha256": manifest_hash, "a4_summary_sha256": sha256(args.a4_summary),
+            "schema": training_schema, "indices": args.indices,
+            "manifest_sha256": manifest_hash, summary_hash_key: sha256(summary_path),
             "pretrained_weights_sha256": sha256(args.weights), "lr": args.lr,
             "surface_weight": args.surface_weight, "surface_sigma": args.surface_sigma,
             "truncation": args.truncation, "validity_weight": args.validity_weight,
@@ -184,7 +202,8 @@ def main() -> int:
             rng_restored = True
     args.output.mkdir(parents=True)
     report = {
-        "schema": "g1_a4_overfit_v2", "status": "running", "beta": 0,
+        "schema": training_schema, "status": "running", "beta": 0,
+        "target_route": ROUTE if four_route else "legacy_a4",
         "teacher_forced_support": True, "indices": args.indices,
         "steps": start_step + args.steps, "additional_steps": args.steps,
         "start_step": start_step, "resume_from": str(args.resume) if args.resume else None,
@@ -194,7 +213,8 @@ def main() -> int:
         "lr": args.lr, "seed": args.seed, "manifest_sha256": manifest_hash,
         "surface_weight": args.surface_weight, "surface_sigma": args.surface_sigma,
         "truncation": args.truncation, "validity_weight": args.validity_weight,
-        "a4_summary_sha256": sha256(args.a4_summary),
+        summary_hash_key: sha256(summary_path),
+        "target_summary": str(summary_path),
         "pretrained_weights": str(args.weights), "pretrained_weights_sha256": sha256(args.weights),
         "pretrained_loading": "strict: all released Hi3D decoder parameters; old output head frozen/unused; new head random",
         "encoder_initialization": "random; adapted vae3d Encoder structure, factor 8/latent 32",

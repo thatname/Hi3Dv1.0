@@ -28,7 +28,8 @@ def snapshot(run: Path) -> dict:
     if not run.is_relative_to(Path("/data/hi3d").resolve()):
         raise ValueError("G1 run must be inside /data/hi3d")
     config = read_json(run / "resolved_config.json")
-    if config.get("schema") not in {"g1_a4_overfit_v1", "g1_a4_overfit_v2"}:
+    if config.get("schema") not in {"g1_a4_overfit_v1", "g1_a4_overfit_v2",
+                                    "g1_four_route_v1"}:
         raise ValueError("Unsupported G1 training report schema")
     trace = read_json(run / "trace.json", optional=True)
     if trace is None:
@@ -53,6 +54,7 @@ def snapshot(run: Path) -> dict:
         "lr": config.get("lr"), "seed": config.get("seed"),
         "gpu": config.get("gpu"), "torch_version": config.get("torch_version"),
         "manifest_sha256": config.get("manifest_sha256"),
+        "target_route": config.get("target_route"),
         "pretrained_loading": config.get("pretrained_loading"),
         "encoder_initialization": config.get("encoder_initialization"),
         "peak_cuda_allocated_bytes": config.get("peak_cuda_allocated_bytes"),

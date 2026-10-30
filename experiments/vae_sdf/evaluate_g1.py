@@ -20,19 +20,31 @@ from .g0b_field_adapter import VAE_FROM_HI3D
 from .g1_model import G1VAE, _keys, _rows
 from .train_g1 import load_asset, sha256, write_json
 from .g1_split import check_split
+from .g1_targets import ROUTE, target_rows
 
 
-def _raw_mesh(cells, signed, delta, center, scale, resolution):
+def _raw_mesh(cells, signed, delta, center, scale, resolution, *, four_route=False, phase=.5):
     import trimesh
 
     if len(cells) == 0:
         return trimesh.Trimesh(vertices=np.empty((0, 3)), faces=np.empty((0, 3), np.int64),
                                process=False)
-    packed = torch.cat((torch.zeros((len(cells), 1), device=cells.device, dtype=torch.int32),
-                        cells.int()), 1)
-    vertices, faces = extract_mesh(
-        packed, signed[:, VAE_FROM_HI3D], delta[:, VAE_FROM_HI3D],
-        resolution, sampling_offset=.5)
+    if four_route:
+        from .four_route_a3 import RouteSurface
+
+        sample = {"coords": cells.cpu().numpy(), "resolution": resolution,
+                  "sampling_offset": phase,
+                  "features": torch.cat((signed[:, VAE_FROM_HI3D],
+                                          delta[:, VAE_FROM_HI3D].reshape(-1, 24)), 1)
+                      .cpu().numpy()}
+        surface = RouteSurface(sample, "flexicubes", device=str(cells.device))
+        vertices, faces = surface.extract(surface.base.initial, surface.base.initial_delta)
+    else:
+        packed = torch.cat((torch.zeros((len(cells), 1), device=cells.device, dtype=torch.int32),
+                            cells.int()), 1)
+        vertices, faces = extract_mesh(
+            packed, signed[:, VAE_FROM_HI3D], delta[:, VAE_FROM_HI3D],
+            resolution, sampling_offset=phase)
     return trimesh.Trimesh(vertices=vertices.cpu().numpy() * scale + center,
                            faces=faces.cpu().numpy(), process=False)
 
@@ -50,7 +62,9 @@ def _support_stats(predicted, expected, resolution):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--a4-summary", type=Path, required=True)
+    targets = parser.add_mutually_exclusive_group(required=True)
+    targets.add_argument("--a4-summary", type=Path)
+    targets.add_argument("--paired-summary", type=Path)
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -68,14 +82,20 @@ def main() -> int:
     manifest_bytes = args.manifest.read_bytes()
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     manifest = json.loads(manifest_bytes)
-    rows = json.loads(args.a4_summary.read_text())["assets"]
+    summary_path = args.paired_summary or args.a4_summary
+    four_route = args.paired_summary is not None
+    if four_route and args.output.resolve().is_relative_to(summary_path.resolve().parent.parent):
+        parser.error("Four-route G1 evaluation must be outside the G0 preparation directory")
+    rows = target_rows(summary_path, manifest, four_route=four_route)
+    training_schema = "g1_four_route_v1" if four_route else "g1_a4_overfit_v2"
+    summary_hash_key = "paired_summary_sha256" if four_route else "a4_summary_sha256"
     split_hash = check_split(args.split, manifest, manifest_hash, args.role, args.indices) if args.split else None
     state = torch.load(args.checkpoint, map_location="cuda:0", weights_only=False)
     config = state["config"]
-    if (config.get("schema") != "g1_a4_overfit_v2"
+    if (config.get("schema") != training_schema
             or config.get("status") != "completed"
             or config.get("manifest_sha256") != manifest_hash
-            or config.get("a4_summary_sha256") != sha256(args.a4_summary)
+            or config.get(summary_hash_key) != sha256(summary_path)
             or config.get("pretrained_weights_sha256") != sha256(args.weights)
             or (split_hash is not None and config.get("split_sha256") != split_hash)
             or int(state["steps"]) != config.get("steps")):
@@ -89,13 +109,15 @@ def main() -> int:
         "schema": "g1_reconstruction_eval_v1", "status": "running",
         "checkpoint": str(args.checkpoint), "checkpoint_sha256": sha256(args.checkpoint),
         "checkpoint_step": config["steps"], "training_run": str(args.checkpoint.parent),
-        "manifest_sha256": manifest_hash, "a4_summary_sha256": sha256(args.a4_summary),
+        "manifest_sha256": manifest_hash, summary_hash_key: sha256(summary_path),
+        "target_route": ROUTE if four_route else "legacy_a4",
         "weights_sha256": sha256(args.weights), "samples": args.samples, "seed": args.seed,
         "split": str(args.split) if args.split else None,
         "split_sha256": split_hash, "split_role": args.role if args.split else None,
         "max_predicted_sites": args.max_predicted_sites,
         "support_condition": "GT coarse latent coordinates; compare GT versus predicted child support",
-        "mesh_protocol": "vae3d classic MC, sampling_offset=0.5; original coordinates; no cleanup or renormalization",
+        "mesh_protocol": ("FlexiCubes" if four_route else "vae3d classic MC")
+            + ", sampling_offset=0.5; original coordinates; no cleanup or renormalization",
         "assets": [],
     }
     write_json(args.output / "report.json", report)
@@ -107,6 +129,11 @@ def main() -> int:
             raise ValueError(f"Source hash changed at index {index}")
         normalized, center, scale = load_mesh(
             str(source_path), normalization_extent=(128 - 2) / 128)
+        if four_route:
+            route_config = json.loads((Path(asset["cache"]).parent / "resolved_config.json").read_text())
+            if (not np.allclose(center, route_config["normalization_center"], rtol=0, atol=1e-8)
+                    or not np.isclose(scale, route_config["normalization_scale"], rtol=0, atol=1e-8)):
+                raise ValueError(f"Target normalization differs at index {index}")
         import trimesh
         source = trimesh.Trimesh(vertices=np.asarray(normalized.vertices) * scale + center,
                                  faces=np.asarray(normalized.faces), process=False)
@@ -139,7 +166,8 @@ def main() -> int:
                         delta_error = (delta - asset["delta"][target_rows]).abs().mean(-1)
                         entry["field_mae_unique_weighted"] = float((field_error * weight).sum() / weight.sum())
                         entry["delta_mae_unique_weighted"] = float((delta_error * weight).sum() / weight.sum())
-                    mesh = _raw_mesh(cells, signed, delta, center, scale, 128)
+                    mesh = _raw_mesh(cells, signed, delta, center, scale, 128,
+                                     four_route=four_route)
                     entry["mesh_file"] = f"{index:02d}_{name}_raw.ply"
                     mesh.export(args.output / entry["mesh_file"])
                     entry["vs_source"] = mesh_metrics(

@@ -10,9 +10,9 @@
 
 ## G1：同一批 50 件上打通并验证选定路线
 
-1. **锁协议与适配入口。** 核对 v5 的 `flexicubes_smooth` A4 `target.npz` 的 s/delta、原坐标恢复、R、相位、源哈希、法线模式和提取器。当前 `experiments/vae_sdf/train_g1.py` 只接受旧 A4 `summary.json`，并硬编码 R128/phase0.5；不能直接将 v5 路线目录塞给它。先实现独立的目标读取和训练配置，或受控扩展入口，明确缓存 schema、资产索引和输出提取器。Hi3D decoder 骨干热启动，encoder 与新输出头从头初始化；不复用旧 G1 checkpoint。新 run_id 与旧目录隔离。
+1. **锁协议与适配入口。** 核对 v5 的 `flexicubes_smooth` A4 `target.npz` 的 s/delta、原坐标恢复、R、相位、源哈希、法线模式和提取器。`train_g1.py` 已在本地增加 `--paired-summary` 入口，读取固定 v5 R128/phase0.5；新代码尚未在远端 GPU 实测，见 [接入记录](reports/g1-four-route-setup-2026-10-31.md)。高分辨率仍需解除训练循环的 R128 限定并重新验收。Hi3D decoder 骨干热启动，encoder 与新输出头从头初始化；不复用旧 G1 checkpoint。新 run_id 与旧目录隔离。
 2. **相位与分辨率门槛。** v5 是 R128/phase0.5 历史协议。先用少量资产做 phase=0 与 `Point.matrix` 审计，确认相同物理坐标、s/delta 单位、共享点与 GT/预测支撑坐标一致；另建缓存，不修改 v5。再用 R256/512 各取简单体和复杂体量测目标生成时间、细层点/cell 数、CPU RAM、磁盘和 GPU allocated/reserved/driver 显存；完成一次网络 forward/backward。R1024 先做单资产目标与训练 smoke，能稳定反传、保存、恢复后再扩大；R2048 留待可微分块和边界一致性实测。
-3. **训练前准备监控。** 为新 run_id 预留 `/data/hi3d/g0-prep/` 下独立输出目录；本地先运行 `python3 -m experiments.vae_sdf.view_g1 --port 8767 --no-browser --run /data/hi3d/g0-prep/<新run_id>`，打开 `http://127.0.0.1:8767/` 并确认页面上的路径。新训练日志若改变 schema，须先更新只读监控 API。G0 预览占 8765，监控固定 8767；不要启动重复服务。
+3. **训练前准备监控。** G0 的 `/data/hi3d/g0-prep/` 仅作只读输入；新 G1 run_id 使用 `/data/hi3d/g1/<新run_id>`，G2 使用 `/data/hi3d/g2/<新run_id>`，均不可写回 G0 缓存。先运行 `python3 -m experiments.vae_sdf.view_g1 --port 8767 --no-browser --run /data/hi3d/g1/<新run_id>`，打开 `http://127.0.0.1:8767/` 并确认页面上的路径。新训练日志若改变 schema，须先更新只读监控 API。G0 预览占 8765，监控固定 8767；不要启动重复服务。
 4. **阶梯训练。** 先 1 简单 + 1 复杂资产、`beta=0`、GT 支撑，检查 encoder/decoder/支撑头的有限非零梯度和损失趋势；再固定 8–16 训练/2 验证，最后覆盖固定 50 件。每级保留严格恢复证据、GT 与预测支撑 raw mesh、场/位移和支撑指标。旧 8+2 的 index 30 预测支撑边界缺口是重点回归项。实际训练若只使用场/位移损失，记录未在训练反传中运行可微 FlexiCubes；目标生成和最终 mesh 提取仍使用选定路线。
 5. **G1 放行。** 新路线 50 件标签来源和配置可追溯；训练没有 NaN/静默跳层；至少两资产过拟合改善，未训练验证资产的 GT/预测支撑网格均非空且原坐标正确；相对目标的压缩误差、相对原 mesh 的最终误差分开报告。R1024 的显存、吞吐和恢复只依据实际测量决定是否扩大。质量未达标时先定位场、零面、支撑或目标问题，不以运行成功放行 G2。
 
@@ -25,4 +25,4 @@
 
 ## 每轮必须留下的证据
 
-写入 `/data/hi3d/g0-prep/<新run_id>/`：完整 resolved config、源码 HEAD/dirty 状态、manifest 与源/目标哈希、GPU/依赖版本、实际启动与恢复命令、逐步 trace、失败清单、checkpoint 和 raw mesh/指标。更新 [HANDOFF](HANDOFF.md) 与对应阶段报告时注明“源码核查、静态检查、GPU 实测、浏览器实测”各自范围；没有实测不得宣称质量或 R1024/2048 可训练。远端写入范围仅 `/data/hi3d`。
+写入 `/data/hi3d/g1/<新run_id>/` 或 `/data/hi3d/g2/<新run_id>/`：完整 resolved config、源码 HEAD/dirty 状态、manifest 与源/目标哈希、GPU/依赖版本、实际启动与恢复命令、逐步 trace、失败清单、checkpoint 和 raw mesh/指标。phase=0 与高分辨率目标另建缓存，不覆盖 v5。更新 [HANDOFF](HANDOFF.md) 与对应阶段报告时注明“源码核查、静态检查、GPU 实测、浏览器实测”各自范围；没有实测不得宣称质量或 R1024/2048 可训练。远端写入范围仅 `/data/hi3d`。

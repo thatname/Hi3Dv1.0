@@ -50,7 +50,7 @@ class RemoteRun:
             if result.returncode:
                 detail = result.stderr.decode("utf-8", "replace").strip()
                 if "FileNotFoundError" in detail and "resolved_config.json" in detail:
-                    self.cached = {"schema": "g1_a4_overfit_v2", "run": self.root,
+                    self.cached = {"schema": "g1_four_route_v1", "run": self.root,
                                    "status": "waiting", "indices": [], "assets": [],
                                    "planned_steps": None, "trace": [],
                                    "checkpoint": {"available": False}}
@@ -95,7 +95,7 @@ def handler_for(run: RemoteRun):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="le.chang@124.156.97.173")
-    parser.add_argument("--run", default="/data/hi3d/g0-prep/g1-a4-fifty-v2")
+    parser.add_argument("--run", default="/data/hi3d/g1/flexicubes-smooth-r128-v1")
     parser.add_argument("--remote-python", default="/data/hi3d/hi3d-validation/.venv/bin/python")
     parser.add_argument("--remote-repo", default="/data/hi3d/hi3d-vae-field")
     parser.add_argument("--port", type=int, default=8767)
