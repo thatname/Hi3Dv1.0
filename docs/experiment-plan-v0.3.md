@@ -5,6 +5,8 @@
 
 阅读入口：[会话交接与决策状态](HANDOFF.md)。本文是设计方案，其中建议项不自动视为用户已确认；实际进度和可运行命令以交接及阶段报告为准。
 
+**2026-10-30 新增已确认决策：**A3/A4 后续比较 classic MC / FlexiCubes × flat / smooth 四条**重新拟合**路线，最终训练固定选定路线，并扩展到 R1024、条件成熟后 R2048。精确实施契约、验证门槛和 2×5 UI 见 [四路线实施规格](g0-four-route-implementation-spec.md)。现有 R128 A3/A4 和 G0b 的同场换提取器结果保持历史基线，不视为四路线实测。
+
 源码基线：
 
 - Hi3D 实验基线：本地 Hi3Dv1.0-modified，commit `5e5622d0baea953e48bde31607936f1ac1036be6`，迁移为 `/Users/changle/code/3dgen/hi3d-vae-field`。原官方基线 `13657ad09afaa92e350b461a1cd66399e44a59c4` 用于差异比较。
@@ -218,6 +220,8 @@ L = L_field + λdelta*L_delta + λsupport*L_support
 对照先使用共同支撑，建议冻结各初始场窄带支撑的并集并完成完整 cell 构造；另报告各方法原生支撑的系统表现。并集无法保证包含所有可见细节，须记录覆盖缺失。固定 R、采样相位、MC 提取、输入 mesh 和随机种子，先报告未经补洞/简化结果。
 
 A0 候选审计、A1/A2/A3/A4 独立缓存入口已实现；A3/A4 对全部 50 个 mesh 保留 A0 疑点标志而不筛样，分别用相同 classic MC 提取相邻阶段做配对评测。A4 产物另标记倒置穿越单元；完整跨阶段统一评测仍待完成。现有 vae3d `convert` 强制执行 fit 调用，启动参数要求 render_steps≥1，独立阶段入口不改变其行为。
+
+后续四路线对照须从共同 A2 场重新运行 A3/A4，四路同时改变拟合所用提取器和法线模型。先解决 FlexiCubes 的可微拟合与 smooth 双侧法线实现，再做小样本 GPU 验收和固定 50 件批量。A1/A2 的两种提取器仅是共同起点的网格提取，法线选项不生成不同的 A1/A2 场。具体交付及 UI 见 [实施规格](g0-four-route-implementation-spec.md)。
 
 ### 6.2 G0b：迁移接口验收
 
