@@ -20,7 +20,7 @@ from .g0b_field_adapter import VAE_FROM_HI3D
 from .g1_model import G1VAE, _keys, _rows
 from .train_g1 import load_asset, sha256, write_json
 from .g1_split import check_split
-from .g1_targets import ROUTE, target_rows
+from .g1_targets import ROUTE, target_rows as select_target_rows
 
 
 def _raw_mesh(cells, signed, delta, center, scale, resolution, *, four_route=False, phase=.5):
@@ -86,7 +86,7 @@ def main() -> int:
     four_route = args.paired_summary is not None
     if four_route and args.output.resolve().is_relative_to(summary_path.resolve().parent.parent):
         parser.error("Four-route G1 evaluation must be outside the G0 preparation directory")
-    rows = target_rows(summary_path, manifest, four_route=four_route)
+    rows = select_target_rows(summary_path, manifest, four_route=four_route)
     training_schema = "g1_four_route_v1" if four_route else "g1_a4_overfit_v2"
     summary_hash_key = "paired_summary_sha256" if four_route else "a4_summary_sha256"
     split_hash = check_split(args.split, manifest, manifest_hash, args.role, args.indices) if args.split else None

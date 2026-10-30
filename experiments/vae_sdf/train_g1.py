@@ -22,7 +22,7 @@ from vae3d.geometry import validity_loss
 from .g0b_field_adapter import HI3D_FROM_VAE, VAE_FROM_HI3D, pack_target
 from .g1_model import G1VAE, _rows
 from .g1_split import check_split
-from .g1_targets import ROUTE, target_rows
+from .g1_targets import ROUTE, target_rows as select_target_rows
 
 
 def sha256(path: Path) -> str:
@@ -158,7 +158,7 @@ def main() -> int:
     four_route = args.paired_summary is not None
     if four_route and args.output.resolve().is_relative_to(summary_path.resolve().parent.parent):
         p.error("Four-route G1 output must be outside the G0 preparation directory")
-    rows = target_rows(summary_path, manifest, four_route=four_route)
+    rows = select_target_rows(summary_path, manifest, four_route=four_route)
     training_schema = "g1_four_route_v1" if four_route else "g1_a4_overfit_v2"
     summary_hash_key = "paired_summary_sha256" if four_route else "a4_summary_sha256"
     split_hash = check_split(args.split, manifest, manifest_hash, "train", args.indices) if args.split else None
