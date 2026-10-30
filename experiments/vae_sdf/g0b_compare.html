@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>G0b · 原 mesh / MC / FlexiCubes 对比</title>
+  <style>
+    :root { color-scheme: dark; font: 14px system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #10151d; color: #e6edf7; display: flex; height: 100vh; }
+    aside { width: 315px; min-width: 245px; display: flex; flex-direction: column; border-right: 1px solid #2d3848; }
+    header { padding: 15px; border-bottom: 1px solid #2d3848; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    a { color: #8cc8f2; }
+    .muted { color: #a5b2c5; font-size: 12px; line-height: 1.45; }
+    input, select, button { background: #1c2634; color: #e6edf7; border: 1px solid #45546b; border-radius: 6px; padding: 8px; }
+    #search { width: 100%; margin-top: 12px; }
+    button { cursor: pointer; }
+    #list { overflow: auto; flex: 1; }
+    .item { width: 100%; text-align: left; border: 0; border-bottom: 1px solid #25303f; border-radius: 0; padding: 10px 14px; background: transparent; }
+    .item:hover, .item.active { background: #26384e; }
+    .item strong { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item span { display: block; color: #a5b2c5; font-size: 11px; margin-top: 3px; }
+    main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    #toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #2d3848; }
+    #toolbar label { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+    #opacity { width: 100px; }
+    #details { padding: 8px 14px; background: #111a27; border-bottom: 1px solid #334359; overflow-y: auto; max-height: 138px; min-height: 62px; white-space: pre-line; line-height: 1.45; font-size: 12px; }
+    #views { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 2px; background: #2d3848; }
+    #views.overlay { grid-template-columns: 1fr; }
+    .panel { position: relative; min-height: 0; background: #0e141e; overflow: hidden; }
+    .panel h2 { position: absolute; top: 8px; left: 9px; z-index: 1; margin: 0; font-size: 12px; padding: 5px 8px; border-radius: 4px; background: #101923c9; pointer-events: none; }
+    .panel canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    #overlayMcCanvas, #overlayFlexiCanvas { position: absolute; inset: 0; }
+    .panel[hidden] { display: none; }
+    #hint { padding: 9px 14px; border-top: 1px solid #2d3848; }
+    @media (max-width: 850px) {
+      body { flex-direction: column; }
+      aside { width: 100%; min-width: 0; height: 190px; flex: none; }
+      aside header { padding: 8px; }
+      #list { display: flex; overflow-x: auto; overflow-y: hidden; }
+      .item { min-width: 165px; width: 165px; border-right: 1px solid #25303f; }
+      #views { grid-template-columns: 1fr; grid-template-rows: repeat(3, minmax(0,1fr)); }
+      #views.overlay { grid-template-rows: 1fr; }
+      .panel h2 { font-size: 11px; }
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <header>
+      <h1>G0b 网格对比</h1>
+      <div class="muted"><a href="/">返回 G0 浏览器</a> · 原坐标系、无清理的提取网格</div>
+      <div id="count" class="muted">加载清单中…</div>
+      <input id="search" type="search" placeholder="搜索文件名或清单 index">
+    </header>
+    <div id="list"></div>
+  </aside>
+  <main>
+    <div id="toolbar">
+      <label>视图 <select id="viewMode"><option value="side">三视窗并排</option><option value="overlay">MC / FlexiCubes 叠加</option></select></label>
+      <label>显示精度 <select id="quality"><option value="preview">快速预览（简化目标约 6000 面）</option><option value="full">原始提取网格（加载慢）</option></select></label>
+      <button id="reset">重置同步视角</button>
+      <label><input id="wire" type="checkbox">线框</label>
+      <label id="opacityControl">橙色透明度 <input id="opacity" type="range" min="20" max="80" value="50"><span id="opacityValue">50%</span></label>
+      <span class="muted">左键旋转 · 中键平移 · 滚轮缩放</span>
+    </div>
+    <div id="details">选择左侧资产</div>
+    <div id="views">
+      <section class="panel" id="sourcePanel"><h2>原 mesh · 灰白</h2><canvas id="sourceCanvas"></canvas></section>
+      <section class="panel" id="mcPanel"><h2>A4 classic MC · 蓝</h2><canvas id="mcCanvas"></canvas></section>
+      <section class="panel" id="flexiPanel"><h2>A4 FlexiCubes · 橙</h2><canvas id="flexiCanvas"></canvas></section>
+      <section class="panel" id="overlayPanel" hidden><h2>蓝：MC · 橙：FlexiCubes</h2><canvas id="overlayMcCanvas"></canvas><canvas id="overlayFlexiCanvas"></canvas></section>
+    </div>
+    <div id="hint" class="muted">三个视窗使用原 mesh 的同一坐标框和同步相机。快速预览仅用于定位；简化可能隐藏薄结构，质量判断请切换原始网格。指标始终来自未简化网格。</div>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const details = $('details');
+    let rows = [], selected = -1, token = 0, frame = null;
+    const camera = {yaw:0.5,pitch:0.25,distance:2.3,panX:0,panY:0};
+    const meshes = {source:null,mc:null,flexicubes:null};
+    const contexts = {};
+    const vertexShader = `#version 300 es
+      layout(location=0) in vec3 position; layout(location=1) in vec3 normal;
+      uniform mat4 projection; uniform vec3 center; uniform float scale;
+      uniform float yaw; uniform float pitch; uniform float distance; uniform vec2 pan;
+      out vec3 vNormal;
+      void main(){
+        vec3 p=(position-center)*scale;
+        float cy=cos(yaw),sy=sin(yaw),cp=cos(pitch),sp=sin(pitch);
+        vec3 r=vec3(cy*p.x+sy*p.z,p.y,-sy*p.x+cy*p.z);
+        vec3 v=vec3(r.x+pan.x,cp*r.y-sp*r.z+pan.y,sp*r.y+cp*r.z-distance);
+        vec3 n=vec3(cy*normal.x+sy*normal.z,normal.y,-sy*normal.x+cy*normal.z);
+        vNormal=vec3(n.x,cp*n.y-sp*n.z,sp*n.y+cp*n.z);
+        gl_Position=projection*vec4(v,1.0);
+      }`;
+    const fragmentShader = `#version 300 es
+      precision highp float; in vec3 vNormal; uniform vec4 tint; uniform bool wire; out vec4 color;
+      void main(){
+        float light=0.28+0.72*abs(dot(normalize(vNormal),normalize(vec3(0.35,0.7,0.6))));
+        color=vec4(tint.rgb*(wire?1.0:light),tint.a);
+      }`;
+    function compile(gl,type,code){
+      const shader=gl.createShader(type);gl.shaderSource(shader,code);gl.compileShader(shader);
+      if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(shader));
+      return shader;
+    }
+    function setup(canvas){
+      const gl=canvas.getContext('webgl2',{antialias:true,premultipliedAlpha:false});
+      if(!gl)throw Error('需要 WebGL 2 和浏览器硬件加速');
+      const program=gl.createProgram();
+      gl.attachShader(program,compile(gl,gl.VERTEX_SHADER,vertexShader));
+      gl.attachShader(program,compile(gl,gl.FRAGMENT_SHADER,fragmentShader));
+      gl.linkProgram(program);
+      if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+      const uniform=Object.fromEntries(['projection','center','scale','yaw','pitch','distance','pan','tint','wire']
+        .map(name=>[name,gl.getUniformLocation(program,name)]));
+      gl.enable(gl.DEPTH_TEST);
+      return {canvas,gl,program,uniform,buffers:{}};
+    }
+    function parseMesh(buffer){
+      if(buffer.byteLength<8)throw Error('Mesh 数据过短');
+      const view=new DataView(buffer),nv=view.getUint32(0,true),nf=view.getUint32(4,true);
+      if(!nv||!nf||buffer.byteLength!==8+12*(nv+nf))throw Error('Mesh 数据长度无效');
+      const vertices=new Float32Array(buffer,8,nv*3),faces=new Uint32Array(buffer,8+12*nv,nf*3);
+      const normals=new Float32Array(nv*3),low=[Infinity,Infinity,Infinity],high=[-Infinity,-Infinity,-Infinity];
+      for(let i=0;i<nv;i++)for(let k=0;k<3;k++){
+        const x=vertices[3*i+k];if(!Number.isFinite(x))throw Error('Mesh 坐标无效');
+        low[k]=Math.min(low[k],x);high[k]=Math.max(high[k],x);
+      }
+      for(let i=0;i<faces.length;i+=3){
+        const a=faces[i],b=faces[i+1],c=faces[i+2];
+        if(a>=nv||b>=nv||c>=nv)throw Error('Mesh 面索引越界');
+        const ax=vertices[3*b]-vertices[3*a],ay=vertices[3*b+1]-vertices[3*a+1],az=vertices[3*b+2]-vertices[3*a+2];
+        const bx=vertices[3*c]-vertices[3*a],by=vertices[3*c+1]-vertices[3*a+1],bz=vertices[3*c+2]-vertices[3*a+2];
+        const n=[ay*bz-az*by,az*bx-ax*bz,ax*by-ay*bx];
+        for(const j of [a,b,c])for(let k=0;k<3;k++)normals[3*j+k]+=n[k];
+      }
+      for(let i=0;i<nv;i++){
+        const j=3*i,length=Math.hypot(normals[j],normals[j+1],normals[j+2])||1;
+        normals[j]/=length;normals[j+1]/=length;normals[j+2]/=length;
+      }
+      return {vertices,faces,normals,low,high,nv,nf};
+    }
+    function buffersFor(ctx,key,mesh){
+      if(ctx.buffers[key])return ctx.buffers[key];
+      const {gl}=ctx;
+      const create=(target,values)=>{const b=gl.createBuffer();gl.bindBuffer(target,b);gl.bufferData(target,values,gl.STATIC_DRAW);return b;};
+      const result={position:create(gl.ARRAY_BUFFER,mesh.vertices),normal:create(gl.ARRAY_BUFFER,mesh.normals),
+                    triangles:create(gl.ELEMENT_ARRAY_BUFFER,mesh.faces),count:mesh.faces.length,lines:null,lineCount:0};
+      ctx.buffers[key]=result;return result;
+    }
+    function linesFor(ctx,buffers,mesh){
+      if(buffers.lines)return;
+      const faces=mesh.faces,edges=new Uint32Array(faces.length*2);
+      for(let i=0;i<faces.length;i+=3){const j=2*i;
+        edges[j]=faces[i];edges[j+1]=faces[i+1];edges[j+2]=faces[i+1];edges[j+3]=faces[i+2];edges[j+4]=faces[i+2];edges[j+5]=faces[i];}
+      const {gl}=ctx;buffers.lines=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,buffers.lines);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,edges,gl.STATIC_DRAW);buffers.lineCount=edges.length;
+    }
+    function clearBuffers(){
+      for(const ctx of Object.values(contexts))for(const b of Object.values(ctx.buffers)){
+        for(const name of ['position','normal','triangles','lines'])if(b[name])ctx.gl.deleteBuffer(b[name]);
+        ctx.buffers={};
+      }
+    }
+    function drawMesh(ctx,key,tint,transparent){
+      const mesh=meshes[key];if(!mesh||!frame)return;
+      const {gl,uniform}=ctx,b=buffersFor(ctx,key,mesh);
+      gl.uniform4fv(uniform.tint,tint);gl.uniform1i(uniform.wire,0);
+      gl.bindBuffer(gl.ARRAY_BUFFER,b.position);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
+      gl.bindBuffer(gl.ARRAY_BUFFER,b.normal);gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,3,gl.FLOAT,false,0,0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,b.triangles);
+      gl.depthMask(!transparent);gl.drawElements(gl.TRIANGLES,b.count,gl.UNSIGNED_INT,0);
+      if($('wire').checked){
+        linesFor(ctx,b,mesh);gl.uniform1i(uniform.wire,1);
+        gl.uniform4fv(uniform.tint,[...tint.slice(0,3),Math.min(1,tint[3]+0.25)]);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,b.lines);gl.drawElements(gl.LINES,b.lineCount,gl.UNSIGNED_INT,0);
+      }
+    }
+    function draw(ctx,keys){
+      const {gl,canvas,program,uniform}=ctx;
+      if(canvas.closest('.panel').hidden)return;
+      const dpr=Math.min(devicePixelRatio,2),w=Math.max(1,Math.round(canvas.clientWidth*dpr)),h=Math.max(1,Math.round(canvas.clientHeight*dpr));
+      if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+      gl.viewport(0,0,w,h);
+      if(ctx===contexts.overlayFlexi)gl.clearColor(0,0,0,0);
+      else gl.clearColor(0.055,0.075,0.11,1);
+      gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+      if(!frame)return;
+      const f=1/Math.tan(Math.PI/8),near=0.01,far=100;
+      const projection=new Float32Array([f*h/w,0,0,0,0,f,0,0,0,0,(far+near)/(near-far),-1,0,0,2*far*near/(near-far),0]);
+      gl.useProgram(program);gl.uniformMatrix4fv(uniform.projection,false,projection);
+      gl.uniform3fv(uniform.center,frame.center);gl.uniform1f(uniform.scale,frame.scale);
+      gl.uniform1f(uniform.yaw,camera.yaw);gl.uniform1f(uniform.pitch,camera.pitch);
+      gl.uniform1f(uniform.distance,camera.distance);gl.uniform2f(uniform.pan,camera.panX,camera.panY);
+      if(keys.length>1){gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);}
+      const alpha=Number($('opacity').value)/100;
+      for(const key of keys){const rgb=key==='source'?[0.8,0.84,0.9]:key==='mc'?[0.32,0.66,0.98]:[1,0.53,0.25];
+        drawMesh(ctx,key,[...rgb,keys.length>1?alpha:1],keys.length>1);}
+      gl.depthMask(true);gl.disable(gl.BLEND);
+    }
+    function drawAll(){
+      draw(contexts.source,['source']);draw(contexts.mc,['mc']);draw(contexts.flexicubes,['flexicubes']);
+      draw(contexts.overlayMc,['mc']);draw(contexts.overlayFlexi,['flexicubes']);
+    }
+    function updateView(){
+      const overlay=$('viewMode').value==='overlay';
+      $('views').classList.toggle('overlay',overlay);
+      for(const id of ['sourcePanel','mcPanel','flexiPanel'])$(id).hidden=overlay;
+      $('overlayPanel').hidden=!overlay;
+      $('opacityControl').style.display=overlay?'inline-flex':'none';
+      $('overlayFlexiCanvas').style.opacity=String(Number($('opacity').value)/100);
+      drawAll();
+    }
+    function formatMetric(value){return value==null?'—':Number(value).toPrecision(5);}
+    function showDetails(row){
+      const g=row.g0b,mc=g.mc,flex=g.flexicubes,delta=flex.chamfer_l1-mc.chamfer_l1;
+      details.textContent=`清单 index ${row.index}（第 ${row.index+1} 件） · ${row.name}\n`
+        +`A0：${g.a0_status} · A4 倒置穿越 cell：${g.inverted_crossing_cells} · ${row.watertight?'拓扑闭合候选':'非闭合输入'}\n`
+        +`原始网格面数：输入 ${row.faces} · MC ${mc.faces} · FlexiCubes ${flex.faces}\n`
+        +`当前显示：${$('quality').value==='full'?'原始网格':'简化预览（目标约 6000 面，结果可能更多）'}\n`
+        +`Chamfer L1（原坐标单位）：MC ${formatMetric(mc.chamfer_l1)} · FlexiCubes ${formatMetric(flex.chamfer_l1)} · 差 ${formatMetric(delta)}\n`
+        +`F-score@0.5%：MC ${(100*mc.fscore['0.005'].fscore).toFixed(2)}% · FlexiCubes ${(100*flex.fscore['0.005'].fscore).toFixed(2)}% · 边界边 ${mc.boundary_edges} / ${flex.boundary_edges}`;
+    }
+    function renderList(){
+      const query=$('search').value.trim().toLowerCase(),list=$('list');list.replaceChildren();
+      const numbered=query.match(/^(?:index\s*|#)?(\d+)$/);
+      const shown=rows.filter(row=>row.g0b?.status==='success'&&(
+        numbered?row.index===Number(numbered[1]):row.name.toLowerCase().includes(query)));
+      $('count').textContent=`${shown.length} / ${rows.length} 件可看 · 可输入清单 index 7、46、11、40、0`;
+      for(const row of shown){
+        const b=document.createElement('button');b.className='item'+(row.index===selected?' active':'');
+        const title=document.createElement('strong'),note=document.createElement('span');
+        const change=row.g0b.flexicubes.chamfer_l1-row.g0b.mc.chamfer_l1;
+        title.textContent=`index ${row.index} · ${row.name}`;
+        note.textContent=`${change>=0?'+':''}${formatMetric(change)} Chamfer · A4 翻转 ${row.g0b.inverted_crossing_cells}`;
+        b.append(title,note);b.onclick=()=>select(row.index);list.append(b);
+      }
+    }
+    async function fetchBundle(index){
+      const full=$('quality').value==='full';
+      const response=await fetch(`/${full?'bundle-full':'bundle'}/${index}`);
+      if(!response.ok)throw Error(`远端加载失败：HTTP ${response.status}`);
+      const buffer=await response.arrayBuffer(),view=new DataView(buffer);
+      if(buffer.byteLength<40||view.getUint32(0,true)!==0x32423047)throw Error('G0b 网格包格式无效');
+      const lengths=[view.getUint32(4,true),view.getUint32(8,true),view.getUint32(12,true)];
+      if(lengths.some(x=>x<8)||40+lengths.reduce((a,b)=>a+b,0)!==buffer.byteLength)
+        throw Error('G0b 网格包长度无效');
+      const low=[view.getFloat32(16,true),view.getFloat32(20,true),view.getFloat32(24,true)];
+      const high=[view.getFloat32(28,true),view.getFloat32(32,true),view.getFloat32(36,true)];
+      let offset=40;
+      const decoded=lengths.map(length=>{const mesh=parseMesh(buffer.slice(offset,offset+length));offset+=length;return mesh;});
+      return {source:decoded[0],mc:decoded[1],flexicubes:decoded[2],low,high};
+    }
+    async function select(index){
+      selected=index;const myToken=++token,row=rows[index];
+      history.replaceState(null,'',`/compare?index=${index}`);
+      camera.yaw=0.5;camera.pitch=0.25;camera.distance=2.3;camera.panX=0;camera.panY=0;
+      clearBuffers();frame=null;for(const key of Object.keys(meshes))meshes[key]=null;
+      const full=$('quality').value==='full';
+      renderList();drawAll();details.textContent=`index ${index} · ${row.name}\n${full?'传输原始网格，当前网络可能需要几分钟…':'生成并传输快速预览…'}`;
+      try{
+        const {source,mc,flexicubes,low,high}=await fetchBundle(index);
+        if(myToken!==token)return;
+        meshes.source=source;meshes.mc=mc;meshes.flexicubes=flexicubes;
+        frame={center:low.map((x,k)=>(x+high[k])/2),
+               scale:1/Math.max(...high.map((x,k)=>x-low[k]),1e-9)};
+        showDetails(row);drawAll();
+      }catch(error){if(myToken===token)details.textContent=`index ${index} · ${row.name}\n加载失败：${error.message}`;}
+    }
+    function bindCamera(canvas){
+      let drag=null;
+      canvas.onpointerdown=e=>{if(e.button!==0&&e.button!==1)return;
+        e.preventDefault();drag={id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId);};
+      canvas.onpointerup=e=>{if(drag?.id===e.pointerId)drag=null;};
+      canvas.onpointercancel=e=>{if(drag?.id===e.pointerId)drag=null;};
+      canvas.onlostpointercapture=()=>drag=null;
+      canvas.onauxclick=e=>{if(e.button===1)e.preventDefault();};
+      canvas.onpointermove=e=>{
+        if(!drag||drag.id!==e.pointerId)return;
+        if(!(e.buttons&(drag.button===1?4:1))){drag=null;return;}
+        const dx=e.clientX-drag.x,dy=e.clientY-drag.y;
+        if(drag.button===1){
+          const units=2*camera.distance*Math.tan(Math.PI/8)/Math.max(canvas.clientHeight,1);
+          camera.panX+=dx*units;camera.panY-=dy*units;
+        }else{camera.yaw+=dx*0.008;camera.pitch=Math.max(-1.5,Math.min(1.5,camera.pitch+dy*0.008));}
+        drag.x=e.clientX;drag.y=e.clientY;drawAll();
+      };
+      canvas.onwheel=e=>{e.preventDefault();camera.distance=Math.max(0.8,Math.min(20,camera.distance*Math.exp(e.deltaY*0.001)));drawAll();};
+    }
+    try{
+      for(const [key,id] of [['source','sourceCanvas'],['mc','mcCanvas'],['flexicubes','flexiCanvas'],
+                             ['overlayMc','overlayMcCanvas'],['overlayFlexi','overlayFlexiCanvas']]){
+        contexts[key]=setup($(id));bindCamera($(id));
+      }
+      $('viewMode').onchange=updateView;
+      $('quality').onchange=()=>{if(selected>=0)select(selected);};
+      $('wire').onchange=drawAll;
+      $('opacity').oninput=()=>{$('opacityValue').textContent=`${$('opacity').value}%`;
+        $('overlayFlexiCanvas').style.opacity=String(Number($('opacity').value)/100);};
+      $('reset').onclick=()=>{camera.yaw=0.5;camera.pitch=0.25;camera.distance=2.3;camera.panX=0;camera.panY=0;drawAll();};
+      $('search').oninput=renderList;
+      window.onresize=drawAll;
+      updateView();
+      fetch('/api/catalog').then(r=>{if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json();}).then(data=>{
+        if(!data.has_g0b)throw Error('当前清单没有 G0b 缓存');
+        rows=data.rows;renderList();
+        const requested=Number(new URLSearchParams(location.search).get('index'));
+        const first=rows.find(r=>r.index===requested&&r.g0b?.status==='success')
+          ||rows.find(r=>r.g0b?.status==='success');
+        if(first)select(first.index);else details.textContent='没有可查看的 G0b 资产';
+      }).catch(error=>details.textContent=`目录加载失败：${error.message}`);
+    }catch(error){details.textContent=`浏览器初始化失败：${error.message}`;}
+  </script>
+</body>
+</html>

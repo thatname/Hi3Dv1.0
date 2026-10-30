@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import struct
 import subprocess
 import webbrowser
+import zlib
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 
 
 HTML = Path(__file__).with_name("mesh_browser.html")
+COMPARE_HTML = Path(__file__).with_name("g0b_compare.html")
 
 
 class RemoteSource:
@@ -55,6 +58,9 @@ class RemoteSource:
     def batch_summary(self) -> dict:
         return json.loads(self.run(["cat", f"{self.batch_root}/summary.json"]))
 
+    def g0b_summary(self, g0b_root: str) -> dict:
+        return json.loads(self.run(["cat", f"{g0b_root}/summary.json"]))
+
     def mesh(self, index: int) -> bytes:
         library_paths = ":".join((f"{self.root}/vendor-full", f"{self.root}/vae3d", self.root))
         return self.run([
@@ -80,8 +86,37 @@ class RemoteSource:
             "--slice-index", str(slice_index),
         ])
 
+    def g0b_mesh(self, index: int, extractor: str, g0b_root: str) -> bytes:
+        if extractor not in {"mc", "flexicubes"}:
+            raise ValueError("Invalid G0b extractor")
+        library_paths = ":".join((f"{self.root}/vendor-full", f"{self.root}/vae3d", self.root))
+        return self.run([
+            "env", f"PYTHONPATH={library_paths}", self.python,
+            "-m", "experiments.vae_sdf.remote_g0b_mesh",
+            "--root", g0b_root, "--manifest", f"{self.root}/{self.manifest_name}",
+            "--index", str(index), "--extractor", extractor,
+        ])
 
-def catalog(manifest: dict, audit: dict, batch: dict | None = None) -> dict:
+    def g0b_bundle(self, index: int, g0b_root: str, preview_faces: int) -> bytes:
+        library_paths = ":".join((f"{self.root}/vendor-full", f"{self.root}/vae3d", self.root))
+        compressed = self.run([
+            "env", f"PYTHONPATH={library_paths}", self.python,
+            "-m", "experiments.vae_sdf.remote_g0b_bundle",
+            "--root", g0b_root, "--manifest", f"{self.root}/{self.manifest_name}",
+            "--audit", f"{self.root}/{self.audit_name}", "--index", str(index),
+            "--preview-faces", str(preview_faces),
+        ])
+        payload = zlib.decompress(compressed)
+        if payload[:4] != b"G0B2" or len(payload) < 40:
+            raise ValueError("Invalid G0b mesh bundle")
+        lengths = struct.unpack_from("<III", payload, 4)
+        if any(length < 8 for length in lengths) or len(payload) != 40 + sum(lengths):
+            raise ValueError("Incomplete G0b mesh bundle")
+        return payload
+
+
+def catalog(manifest: dict, audit: dict, batch: dict | None = None,
+            g0b: dict | None = None) -> dict:
     entries = manifest.get("assets", [])
     results = audit.get("assets", [])
     if not entries or len(entries) != len(results):
@@ -123,12 +158,32 @@ def catalog(manifest: dict, audit: dict, batch: dict | None = None) -> dict:
                 target_resolution = metrics["cache_check"]["resolution"]
             else:
                 row["target"] = {"status": result.get("status", "pending")}
+    if g0b is not None:
+        compared = g0b.get("assets", [])
+        if len(compared) != len(rows) or g0b.get("denominator") != len(rows):
+            raise ValueError("G0b batch differs from selected manifest")
+        for index, (row, result, asset) in enumerate(zip(rows, compared, entries)):
+            if (result.get("index") != index or result.get("id") != row["id"]
+                    or result.get("source") != asset["path"]
+                    or result.get("source_sha256") != asset["sha256"]):
+                raise ValueError(f"G0b batch differs at index {index}")
+            row["g0b"] = {"status": result.get("status"),
+                          "a0_status": result.get("a0_status"),
+                          "a0_concerns": result.get("a0_concerns", [])}
+            if result.get("status") == "success":
+                metrics = result["metrics"]
+                row["g0b"].update({
+                    "inverted_crossing_cells": result["audit"]["a4_inverted_crossing_cells"],
+                    "mc": metrics["MC_vs_source"],
+                    "flexicubes": metrics["FlexiCubes_vs_source"],
+                    "flexicubes_vs_mc": metrics["FlexiCubes_vs_MC"],
+                })
     return {"rows": rows, "selection": manifest.get("selection", {}),
             "audit_resolution": audit.get("resolution"), "target_resolution": target_resolution,
-            "has_targets": batch is not None}
+            "has_targets": batch is not None, "has_g0b": g0b is not None}
 
 
-def handler_for(source: RemoteSource, data: dict):
+def handler_for(source: RemoteSource, data: dict, g0b_root: str | None = None):
     @lru_cache(maxsize=2)
     def mesh(index: int) -> bytes:
         return source.mesh(index)
@@ -137,6 +192,18 @@ def handler_for(source: RemoteSource, data: dict):
     def target_mesh(index: int, stage: str) -> bytes:
         return source.target(index, stage, "mesh")
 
+    @lru_cache(maxsize=6)
+    def g0b_mesh(index: int, extractor: str) -> bytes:
+        return source.g0b_mesh(index, extractor, g0b_root)
+
+    @lru_cache(maxsize=4)
+    def g0b_bundle(index: int) -> bytes:
+        return source.g0b_bundle(index, g0b_root, 6000)
+
+    @lru_cache(maxsize=1)
+    def g0b_full_bundle(index: int) -> bytes:
+        return source.g0b_bundle(index, g0b_root, 0)
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             request = urlsplit(self.path)
@@ -144,8 +211,44 @@ def handler_for(source: RemoteSource, data: dict):
             try:
                 if path == "/":
                     body, mime = HTML.read_bytes(), "text/html; charset=utf-8"
+                elif path == "/compare" and data["has_g0b"]:
+                    body, mime = COMPARE_HTML.read_bytes(), "text/html; charset=utf-8"
                 elif path == "/api/catalog":
                     body, mime = json.dumps(data, ensure_ascii=False).encode(), "application/json"
+                elif path.startswith("/bundle/") and data["has_g0b"]:
+                    value = path[8:]
+                    if not value.isdigit():
+                        self.send_error(404)
+                        return
+                    index = int(value)
+                    if (index >= len(data["rows"])
+                            or data["rows"][index].get("g0b", {}).get("status") != "success"):
+                        self.send_error(404, "G0b bundle not available")
+                        return
+                    body, mime = g0b_bundle(index), "application/octet-stream"
+                elif path.startswith("/bundle-full/") and data["has_g0b"]:
+                    value = path[13:]
+                    if not value.isdigit():
+                        self.send_error(404)
+                        return
+                    index = int(value)
+                    if (index >= len(data["rows"])
+                            or data["rows"][index].get("g0b", {}).get("status") != "success"):
+                        self.send_error(404, "G0b full bundle not available")
+                        return
+                    body, mime = g0b_full_bundle(index), "application/octet-stream"
+                elif path.startswith("/g0b/") and data["has_g0b"]:
+                    parts = path.strip("/").split("/")
+                    if (len(parts) != 3 or not parts[1].isdigit()
+                            or parts[2] not in {"mc", "flexicubes"}):
+                        self.send_error(404)
+                        return
+                    index, extractor = int(parts[1]), parts[2]
+                    if (index >= len(data["rows"])
+                            or data["rows"][index].get("g0b", {}).get("status") != "success"):
+                        self.send_error(404, "G0b mesh not available")
+                        return
+                    body, mime = g0b_mesh(index, extractor), "application/octet-stream"
                 elif path.startswith("/mesh/") and path[6:].isdigit():
                     index = int(path[6:])
                     if index >= len(data["rows"]) or data["rows"][index]["status"] != "loaded":
@@ -208,14 +311,17 @@ def main() -> int:
                         help="G0 manifest to browse (default: balanced50)")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--batch-root", help="Remote A1/A2 batch root for balanced50")
+    parser.add_argument("--g0b-root", help="Remote G0b batch root for balanced50")
     args = parser.parse_args()
     if args.timeout < 1 or not 0 <= args.port <= 65535:
         parser.error("timeout must be positive and port must be in 0..65535")
     source = RemoteSource(args.host, args.remote_dir, args.remote_python, args.timeout,
                           args.dataset, args.batch_root)
     batch = source.batch_summary() if args.dataset == "balanced50" else None
-    data = catalog(source.json_file(source.manifest_name), source.json_file(source.audit_name), batch)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(source, data))
+    g0b_root = args.g0b_root or f"{source.root}/g0b-a4-r128-v1"
+    g0b = source.g0b_summary(g0b_root) if args.dataset == "balanced50" else None
+    data = catalog(source.json_file(source.manifest_name), source.json_file(source.audit_name), batch, g0b)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(source, data, g0b_root))
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"G0 mesh viewer: {url} — {len(data['rows'])} assets. Ctrl+C to stop.", flush=True)
     if not args.no_browser:

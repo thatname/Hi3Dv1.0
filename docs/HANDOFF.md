@@ -16,7 +16,8 @@
 | 方案与分析 | 已完成静态源码核查、v0.3 方案、修改版分析；v0.2 仅作历史归档 |
 | 实验代码 | 已有 G0 清单/浏览、A0 闭合与符号审计及候选距离入口、A1/A2 同源查询与独立缓存、A3 几何拟合、A4 一致深度渲染拟合，以及 G0b A4 场到 Hi3D 角点的打包/回读与 MC/FlexiCubes 对照；各批量阶段均有逐资产结果和回读审计。训练适配仍未实现 |
 | 目标缓存/实验结果 | 远端 A1/A2 R128 CPU、A3 R128 GPU 30 步与 A4 R128/4096 200 步均 50/50 运行成功，见 [A1/A2](reports/g0-a1a2-batch-r128-2026-10-29.md)、[A3](reports/g0-a3-batch-r128-2026-10-30.md)、[A4](reports/g0-a4-batch-r128-render4096-2026-10-30.md) 报告。A4 相对 A3 同提取器 Chamfer 改善 39/50，但 16 个资产存在倒置穿越 cell，需带质量疑点标志。A0 自动审计为 12 单体候选、8 多体需复核、30 非闭合仅从 A0 符号基准排除；A3/A4 均保留原标志。仅有 1 个 R32 未批准 A0 候选缓存，见 [A0 审计记录](reports/g0-a0-audit-smoke-2026-10-29.md)。尚无正式 A0 真值、完整 G0 对照或训练 checkpoint |
-| G0 准备 | 固定独立的 20 闭合候选 / 30 非闭合清单 `manifest-balanced50.json`，完整复检 50/50 可加载；原始与补样清单及失败记录均保留。选样证据见 [G0 准备记录](reports/g0-preparation-2026-10-29.md)。本地[浏览器](g0-mesh-browser.md)可查看全部输入 mesh、A1/A2 零面和场切片。A1/A2/A3/A4 批量已完成；G0b 接口对照 50/50 成功，见 [G0b 报告](reports/g0b-a4-r128-interface-2026-10-30.md)。A0 正式真值及完整 G0 尚未完成 |
+| G0 准备 | 固定独立的 20 闭合候选 / 30 非闭合清单 `manifest-balanced50.json`，完整复检 50/50 可加载；原始与补样清单及失败记录均保留。选样证据见 [G0 准备记录](reports/g0-preparation-2026-10-29.md)。本地[浏览器](g0-mesh-browser.md)可查看全部输入 mesh、A1/A2 零面和场切片，以及 G0b 原 mesh / classic MC / FlexiCubes 三视窗与半透明叠加。A1/A2/A3/A4 批量已完成；G0b 接口对照 50/50 成功，见 [G0b 报告](reports/g0b-a4-r128-interface-2026-10-30.md)。A0 正式真值及完整 G0 尚未完成 |
+| G0b 浏览服务 | 2026-10-30 本机仅保留 `127.0.0.1:8765` 一份 `view_meshes` 服务；入口 `http://127.0.0.1:8765/compare?index=7`。默认简化目标约 6000 面的压缩预览，可切换原精度，不改 G0b 缓存或数值指标。`/compare?index=7` 返回 200；`/bundle/7` 返回 200、346960 字节，约 27 秒；Python 与前端 JS 语法检查通过。远端账号 `le.chang` 无 Hi3D 网页监听；远端 8765/8766 归属 `he.zhou`，未清理；当前账号的 40441/45777 是 VS Code Remote SSH。浏览说明见 [文档](g0-mesh-browser.md) |
 | GPU 验证 | Kaolin 距离算子、nvdiffrast 栅格化的前向/梯度及 A3/A4 50 资产 GPU 拟合已实测；多 GPU 等价性、2048 性能和网络训练未验证 |
 | Git 操作约定 | 未经用户确认不创建新提交；push 由用户操作。本轮 G0 代码及文档仍在本地工作区，远端 Git 仓库未修改 |
 

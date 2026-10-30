@@ -56,6 +56,7 @@
   <aside>
     <header>
       <h1>G0 · Mesh / A1 / A2</h1>
+      <a id="g0bLink" href="/compare" style="display:none;color:#8cc8f2;font-size:12px">打开 G0b MC / FlexiCubes 对比</a>
       <div id="count" class="muted">加载清单中…</div>
       <input id="search" type="search" placeholder="搜索文件名或编号">
       <select id="filter"><option value="all">全部</option><option value="loaded">可加载</option>
@@ -300,6 +301,7 @@
     window.onresize=draw;
     fetch('/api/catalog').then(r=>r.json()).then(data=>{
       rows=data.rows;resolution=data.target_resolution||128;
+      if(data.has_g0b)$('g0bLink').style.display='inline';
       $('sliceIndex').max=String(resolution-1);$('sliceIndex').value=String(Math.floor(resolution/2));
       $('sliceLabel').textContent=`${$('sliceIndex').value} / ${resolution-1}`;
       if(data.has_targets)for(const [value,label] of [['A1-mesh','A1 零等值面'],['A2-mesh','A2 零等值面'],
