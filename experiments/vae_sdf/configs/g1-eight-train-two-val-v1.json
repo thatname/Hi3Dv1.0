@@ -1,0 +1,21 @@
+{
+  "schema": "g1_asset_split_v1",
+  "manifest_sha256": "39d3e5894b61defba5f061f9e1fa970ed3f41f1ae554cc0248f5e9bb05db9b9d",
+  "train_indices": [48, 5, 35, 2, 20, 37, 44, 7],
+  "train_ids": [
+    "001a8338fe3ca27aad4dcbfcda7090c9fbac9d3e1a61882791de885acef2bd98",
+    "001cd49850396a66e9ce220aa9f93e21a73d367a3c99f43a60fd310ce77452f8",
+    "000ff87e5c4e7844d1e219fce3a8cf3e70430dfb3cd74573263a5e8519ce6da7",
+    "0014fac17198dd3ade1da8213a0569aab07ee8b14270dd4cd27e81c76811bea3",
+    "0000eec1454799ccfe5054ba1ff710ef3829e4a61bb1e186310045b69359fd82",
+    "0013cbcfa52897862139b7f18976904c0177763b2868b42ee17fb59f95c5cc95",
+    "00192001f6c99a027b54ce1ca6cf0b82564ce0548d34fa9658b281836e5a8b7a",
+    "002d651ef077d3197025c6ededfbfa9d0a2e9db02e41a4580f3942e42f378ed4"
+  ],
+  "val_indices": [0, 30],
+  "val_ids": [
+    "000839a4229ea493fa4dd5b3f78cd09fef87da411f6d989cc8612504c8ebfcb7",
+    "0009270af5ec66ca68da86eb8bf3ccb01b83fe2c49127a9b87d3a1f3355bf100"
+  ],
+  "purpose": "G1 training and held-out diagnosis within the curated 50; not a representative generalization test"
+}

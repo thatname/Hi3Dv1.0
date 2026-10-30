@@ -183,7 +183,8 @@ def catalog(manifest: dict, audit: dict, batch: dict | None = None,
             "has_targets": batch is not None, "has_g0b": g0b is not None}
 
 
-def handler_for(source: RemoteSource, data: dict, g0b_root: str | None = None):
+def handler_for(source: RemoteSource, data: dict, g0b_root: str | None = None,
+                preview_cache: Path | None = None):
     @lru_cache(maxsize=2)
     def mesh(index: int) -> bytes:
         return source.mesh(index)
@@ -198,6 +199,15 @@ def handler_for(source: RemoteSource, data: dict, g0b_root: str | None = None):
 
     @lru_cache(maxsize=4)
     def g0b_bundle(index: int) -> bytes:
+        if preview_cache is not None:
+            compressed = (preview_cache / f"bundle_{index:02d}.zlib").read_bytes()
+            payload = zlib.decompress(compressed)
+            if payload[:4] != b"G0B2" or len(payload) < 40:
+                raise ValueError("Invalid local G0b preview bundle")
+            lengths = struct.unpack_from("<III", payload, 4)
+            if any(length < 8 for length in lengths) or len(payload) != 40 + sum(lengths):
+                raise ValueError("Incomplete local G0b preview bundle")
+            return payload
         return source.g0b_bundle(index, g0b_root, 6000)
 
     @lru_cache(maxsize=1)
@@ -312,16 +322,28 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--batch-root", help="Remote A1/A2 batch root for balanced50")
     parser.add_argument("--g0b-root", help="Remote G0b batch root for balanced50")
+    parser.add_argument("--preview-cache", type=Path,
+                        help="Local snapshot with catalog.json and compressed G0b preview bundles")
     args = parser.parse_args()
     if args.timeout < 1 or not 0 <= args.port <= 65535:
         parser.error("timeout must be positive and port must be in 0..65535")
     source = RemoteSource(args.host, args.remote_dir, args.remote_python, args.timeout,
                           args.dataset, args.batch_root)
-    batch = source.batch_summary() if args.dataset == "balanced50" else None
     g0b_root = args.g0b_root or f"{source.root}/g0b-a4-r128-v1"
-    g0b = source.g0b_summary(g0b_root) if args.dataset == "balanced50" else None
-    data = catalog(source.json_file(source.manifest_name), source.json_file(source.audit_name), batch, g0b)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(source, data, g0b_root))
+    if args.preview_cache:
+        if args.dataset != "balanced50":
+            parser.error("Local G0b preview cache only supports balanced50")
+        data = json.loads((args.preview_cache / "catalog.json").read_text())
+        if (not data.get("has_g0b") or len(data.get("rows", [])) != 50
+                or any(not (args.preview_cache / f"bundle_{index:02d}.zlib").is_file()
+                       for index in range(50))):
+            parser.error("Incomplete local G0b preview cache")
+    else:
+        batch = source.batch_summary() if args.dataset == "balanced50" else None
+        g0b = source.g0b_summary(g0b_root) if args.dataset == "balanced50" else None
+        data = catalog(source.json_file(source.manifest_name), source.json_file(source.audit_name), batch, g0b)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port),
+                                 handler_for(source, data, g0b_root, args.preview_cache))
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"G0 mesh viewer: {url} — {len(data['rows'])} assets. Ctrl+C to stop.", flush=True)
     if not args.no_browser:

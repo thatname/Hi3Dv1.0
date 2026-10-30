@@ -85,20 +85,20 @@
       layout(location=0) in vec3 position; layout(location=1) in vec3 normal;
       uniform mat4 projection; uniform vec3 center; uniform float scale;
       uniform float yaw; uniform float pitch; uniform float distance; uniform vec2 pan;
-      out vec3 vNormal;
+      out vec3 vViewPos;
       void main(){
         vec3 p=(position-center)*scale;
         float cy=cos(yaw),sy=sin(yaw),cp=cos(pitch),sp=sin(pitch);
         vec3 r=vec3(cy*p.x+sy*p.z,p.y,-sy*p.x+cy*p.z);
         vec3 v=vec3(r.x+pan.x,cp*r.y-sp*r.z+pan.y,sp*r.y+cp*r.z-distance);
-        vec3 n=vec3(cy*normal.x+sy*normal.z,normal.y,-sy*normal.x+cy*normal.z);
-        vNormal=vec3(n.x,cp*n.y-sp*n.z,sp*n.y+cp*n.z);
+        vViewPos=v;
         gl_Position=projection*vec4(v,1.0);
       }`;
     const fragmentShader = `#version 300 es
-      precision highp float; in vec3 vNormal; uniform vec4 tint; uniform bool wire; out vec4 color;
+      precision highp float; in vec3 vViewPos; uniform vec4 tint; uniform bool wire; out vec4 color;
       void main(){
-        float light=0.28+0.72*abs(dot(normalize(vNormal),normalize(vec3(0.35,0.7,0.6))));
+        vec3 faceNormal=normalize(cross(dFdx(vViewPos),dFdy(vViewPos)));
+        float light=0.28+0.72*abs(dot(faceNormal,normalize(vec3(0.35,0.7,0.6))));
         color=vec4(tint.rgb*(wire?1.0:light),tint.a);
       }`;
     function compile(gl,type,code){

@@ -9,6 +9,7 @@
 **/__pycache__/
 *.pyc
 output*/
+/.local-cache/
 
 # Large generated assets
 *.glb

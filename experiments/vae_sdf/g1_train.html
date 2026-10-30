@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>G1 训练监控</title>
+  <style>
+    :root{color-scheme:dark;font:14px system-ui,-apple-system,sans-serif;background:#0b111a;color:#e9f1fb}
+    *{box-sizing:border-box}body{margin:0}a{color:#82c8ff}header{padding:24px max(24px,calc((100vw - 1500px)/2));border-bottom:1px solid #28384b;background:#111c2a}
+    h1{font-size:26px;margin:0 0 6px;letter-spacing:.01em}h2{font-size:16px;margin:0 0 12px}p{line-height:1.5;margin:5px 0}.muted{color:#9cafc4}.small{font-size:12px}
+    main{max-width:1500px;margin:auto;padding:22px 24px 45px}.top{display:flex;justify-content:space-between;gap:20px;align-items:center;flex-wrap:wrap}
+    .badge{display:inline-flex;align-items:center;gap:8px;border-radius:99px;padding:7px 12px;background:#273b50;color:#dbeeff;font-size:12px;font-weight:700}
+    .badge::before{content:"";width:8px;height:8px;border-radius:50%;background:#85b9ed}.badge.running::before{background:#fbbf6f;box-shadow:0 0 10px #fbbf6f}.badge.completed::before{background:#55d6a2}.badge.failed::before{background:#f07b83}
+    .cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:18px 0}.card,.panel{background:#121d2b;border:1px solid #2a3d51;border-radius:12px;padding:16px}.card label{display:block;color:#a8bad0;font-size:12px}.card strong{display:block;font-size:25px;font-variant-numeric:tabular-nums;margin-top:7px}.card .sub{font-size:11px;color:#8da2b8;margin-top:4px}
+    .toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:20px 0}.toolbar select,.toolbar button{background:#1c2c3d;color:#eaf2ff;border:1px solid #49637c;border-radius:7px;padding:8px 10px}.toolbar button{cursor:pointer}.toolbar label{display:flex;gap:8px;align-items:center}
+    .charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.chart{min-width:0}.chart canvas{display:block;width:100%;height:220px}.chart h2{display:flex;justify-content:space-between;gap:10px}.chart h2 span{font-size:12px;font-weight:400;color:#a5bad0}
+    .lower{display:grid;grid-template-columns:1.3fr 1fr;gap:12px;margin-top:12px}.scroll{max-height:470px;overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #27394d}th{position:sticky;top:0;background:#18283b;color:#acc2d8}tr:hover{background:#203248}tr.active{background:#26445b}td.number{text-align:right}.good{color:#68ddb0}.bad{color:#ff9b97}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.note{padding:12px 14px;border-left:3px solid #5da8da;background:#142536;border-radius:5px;margin-top:14px}.error{border-color:#d96670;color:#ffc0c0}
+    @media(max-width:1050px){.cards{grid-template-columns:repeat(3,1fr)}.lower{grid-template-columns:1fr}}@media(max-width:700px){header{padding:18px}main{padding:14px}.cards{grid-template-columns:repeat(2,1fr)}.charts{grid-template-columns:1fr}.card strong{font-size:20px}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="top"><div><h1>G1 训练监控</h1><p class="muted">远端逐步日志 · 本地只读页面 · 每 5 秒检查更新</p></div><span id="badge" class="badge">连接中</span></div>
+  <p class="small muted" id="runPath">正在读取运行目录…</p>
+</header>
+<main>
+  <div class="cards">
+    <div class="card"><label>进度</label><strong id="progress">—</strong><div class="sub" id="progressSub">训练步 / 计划步</div></div>
+    <div class="card"><label>最新总损失</label><strong id="total">—</strong><div class="sub">当前样本，更新前前向值</div></div>
+    <div class="card"><label>最新场损失</label><strong id="field">—</strong><div class="sub">优化场 s，细体素单位</div></div>
+    <div class="card"><label>最新支撑损失</label><strong id="support">—</strong><div class="sub">三级 occupancy BCE</div></div>
+    <div class="card"><label>当前/峰值</label><strong id="resource">—</strong><div class="sub" id="resourceSub">训练耗时 / CUDA allocated</div></div>
+  </div>
+  <div class="toolbar">
+    <label>查看资产 <select id="asset"><option value="all">全部</option></select></label>
+    <button id="refresh">立即刷新</button>
+    <span id="sync" class="small muted">等待远端响应</span>
+  </div>
+  <div class="charts">
+    <section class="panel chart"><h2>总损失 <span>逐步值与 10 步移动均值</span></h2><canvas data-key="loss"></canvas></section>
+    <section class="panel chart"><h2>场损失 <span>近表面加权 SmoothL1</span></h2><canvas data-key="field"></canvas></section>
+    <section class="panel chart"><h2>位移损失 <span>体素单位 SmoothL1</span></h2><canvas data-key="delta"></canvas></section>
+    <section class="panel chart"><h2>支撑损失 <span>三级 BCE 均值</span></h2><canvas data-key="support"></canvas></section>
+    <section class="panel chart"><h2>有效性项 <span>六四面体软约束，图中为原始值</span></h2><canvas data-key="validity"></canvas></section>
+    <section class="panel chart"><h2>KL 诊断 <span>β=0，未计入总损失</span></h2><canvas data-key="kl_diagnostic"></canvas></section>
+  </div>
+  <div class="lower">
+    <section class="panel"><h2>逐资产首末训练损失</h2><p class="muted small">同一模型在连续训练中对每个资产的首次与末次前向；不是独立验证集评估。</p><div class="scroll"><table><thead><tr><th>index</th><th>A0 状态</th><th>倒置 cell</th><th>首次</th><th>末次</th><th>变化</th><th>目标 mesh</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+    <section class="panel"><h2>运行与梯度</h2><div id="details" class="small muted">等待远端数据…</div></section>
+  </div>
+  <p class="note small">当前页面展示训练日志和 checkpoint 状态；曲线不能代替独立验证集的网格评测。<a href="http://127.0.0.1:8765/compare?index=48" id="meshLink">G0b mesh 对比</a>展示原 mesh 与 A4 目标提取结果，<strong>不代表 G1 网络重建</strong>。G1 评测已另行导出 raw PLY 和数值报告。</p>
+</main>
+<script>
+  const $=id=>document.getElementById(id);let state=null,loading=false,timer=null;
+  const selected=()=>$('asset').value;
+  const fmt=(v,n=3)=>Number.isFinite(v)?Number(v).toFixed(n):'—';
+  const gb=v=>Number.isFinite(v)?(v/1e9).toFixed(2)+' GB':'—';
+  function plot(canvas,rows,key,all){
+    const dpr=Math.min(devicePixelRatio||1,2),w=Math.max(canvas.clientWidth,220),h=canvas.clientHeight||220;
+    canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);
+    const c=canvas.getContext('2d');c.scale(dpr,dpr);c.clearRect(0,0,w,h);
+    const L=47,R=14,T=15,B=29,C='#8eb2cf';
+    c.strokeStyle='#2d4358';c.lineWidth=1;
+    for(let i=0;i<=4;i++){let y=T+(h-T-B)*i/4;c.beginPath();c.moveTo(L,y);c.lineTo(w-R,y);c.stroke();}
+    const pts=rows.filter(r=>Number.isFinite(r[key])&&Number.isFinite(r.step));
+    if(!pts.length){c.fillStyle='#9aaec4';c.fillText('暂无训练记录',L+12,h/2);return;}
+    const xmin=Math.min(...pts.map(r=>r.step)),xmax=Math.max(...pts.map(r=>r.step));
+    let ymin=Math.min(...pts.map(r=>r[key])),ymax=Math.max(...pts.map(r=>r[key]));
+    const pad=(ymax-ymin||Math.max(Math.abs(ymax),.01))*.12;ymin-=pad;ymax+=pad;
+    const x=r=>L+(r.step-xmin)/Math.max(1,xmax-xmin)*(w-L-R);
+    const y=r=>T+(ymax-r[key])/(ymax-ymin)*(h-T-B);
+    c.fillStyle=C;c.font='11px system-ui';c.textAlign='right';c.fillText(fmt(ymax,2),L-6,T+4);c.fillText(fmt(ymin,2),L-6,h-B+3);
+    c.textAlign='left';c.fillText(String(xmin),L,h-7);c.textAlign='right';c.fillText(String(xmax),w-R,h-7);
+    c.fillStyle=all?'#71a0c1':'#58d6aa';
+    for(const r of pts){c.beginPath();c.arc(x(r),y(r),all?2.4:3.7,0,2*Math.PI);c.fill();}
+    const smooth=all&&pts.length>=10?pts.map((r,i)=>({...r,[key]:pts.slice(Math.max(0,i-9),i+1).reduce((s,z)=>s+z[key],0)/Math.min(i+1,10)})):pts;
+    c.strokeStyle=all?'#ffc477':'#58d6aa';c.lineWidth=2;c.beginPath();smooth.forEach((r,i)=>i?c.lineTo(x(r),y(r)):c.moveTo(x(r),y(r)));c.stroke();
+  }
+  function redraw(){if(!state)return;const id=selected(),rows=id==='all'?state.trace:state.trace.filter(r=>r.index===Number(id));
+    for(const canvas of document.querySelectorAll('canvas[data-key]'))plot(canvas,rows,canvas.dataset.key,id==='all');}
+  function render(){if(!state)return;const s=state,trace=s.trace,last=trace.at(-1),asset=selected();
+    $('badge').textContent=s.status==='completed'?'已完成':s.status==='running'?'训练中':s.status==='waiting'?'等待训练目录':s.status==='failed'?'运行失败':s.status;
+    $('badge').className='badge '+s.status;
+    $('runPath').textContent=s.run+' · '+s.schema+' · GT 支撑 · β='+s.beta;
+    $('progress').textContent=trace.length+' / '+(s.planned_steps??'—');
+    $('progressSub').textContent=(s.indices?.length||0)+' 个资产 · 最近 index '+(last?.index??'—');
+    $('total').textContent=fmt(last?.loss);$('field').textContent=fmt(last?.field);$('support').textContent=fmt(last?.support);
+    $('resource').textContent=last?fmt(last.elapsed_seconds,1)+' s':'—';
+    $('resourceSub').textContent='峰值 CUDA allocated '+gb(s.peak_cuda_allocated_bytes);
+    const previous=asset;const assets=s.assets||[];$('asset').replaceChildren(new Option('全部 '+assets.length+' 个','all'));
+    for(const a of assets)$('asset').add(new Option('index '+a.index+' · '+String(a.id).slice(0,12),a.index));
+    $('asset').value=previous==='all'||assets.some(a=>String(a.index)===previous)?previous:'all';
+    const by=new Map();for(const r of trace){if(!by.has(r.index))by.set(r.index,[]);by.get(r.index).push(r);}
+    const tbody=$('rows');tbody.replaceChildren();
+    for(const a of assets){const values=by.get(a.index)||[],first=values[0],end=values.at(-1),diff=end&&first?end.loss-first.loss:null;
+      const tr=document.createElement('tr');if(String(a.index)===selected())tr.className='active';
+      for(const value of [a.index,a.a0_status??'—',a.inverted_crossing_cells??'—',fmt(first?.loss),fmt(end?.loss),diff==null?'—':(diff>=0?'+':'')+fmt(diff)]){
+        const td=document.createElement('td');td.textContent=value;if(typeof value==='number'||String(value).match(/^[-+]?\d+\.\d+$/))td.className='number';tr.append(td);}
+      tr.children[5].classList.add(diff==null?'':diff<0?'good':'bad');
+      const td=document.createElement('td'),link=document.createElement('a');link.href='http://127.0.0.1:8765/compare?index='+a.index;link.textContent='A4';link.target='_blank';td.append(link);tr.append(td);
+      tr.onclick=e=>{if(e.target.tagName==='A')return;$('asset').value=String(a.index);$('meshLink').href=link.href;render();};tbody.append(tr);}
+    $('meshLink').href='http://127.0.0.1:8765/compare?index='+(selected()==='all'?48:selected());
+    const gradients=last?.gradients||{};
+    const lines=[`检查点：${s.checkpoint?.available?'可用，'+gb(s.checkpoint.bytes):'尚未保存'}`,
+      `运行状态：${s.status}${s.error?' · '+s.error:''}`,
+      `学习率：${s.lr} · 随机种子：${s.seed}`,
+      `场权重：${s.surface_weight??'未设置'} · 截断：${s.truncation??'未设置'} · 有效性：${s.validity_weight??'未设置'}`,
+      `编码器：${s.encoder_initialization||'—'}`,
+      `骨干：${s.pretrained_loading||'—'}`,
+      `最近梯度：`];
+    for(const [name,g] of Object.entries(gradients))lines.push(`　${name}：${g.present&&g.finite?'有限':'异常'} · norm ${fmt(g.norm,4)}`);
+    $('details').textContent=lines.join('\n');$('details').style.whiteSpace='pre-wrap';
+    redraw();}
+  async function refresh(){if(loading)return;loading=true;$('sync').textContent='正在从远端读取…';
+    try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);
+      state=await r.json();render();$('sync').textContent='最近同步 '+new Date().toLocaleTimeString();}
+    catch(e){$('sync').textContent='读取失败：'+e.message+'；5 秒后重试';}
+    finally{loading=false;clearTimeout(timer);timer=setTimeout(refresh,5000);}}
+  $('asset').onchange=()=>{render();};$('refresh').onclick=refresh;window.addEventListener('resize',redraw);
+  refresh();
+</script>
+</body>
+</html>
