@@ -1,4 +1,4 @@
-# 本地浏览远端 G0 mesh、A1/A2 场与 G0b 提取对比
+# 本地浏览远端 G0 mesh、A1/A2 场与四路线拟合
 
 入口：[view_g0_meshes.command](../view_g0_meshes.command)。在 macOS Finder 双击，或在本工程根目录运行：
 
@@ -8,7 +8,7 @@
 
 脚本启动只监听 `127.0.0.1` 的本机 HTTP 服务，自动打开浏览器。默认从 `le.chang@124.156.97.173` 的 `/data/hi3d/g0-prep` 读取 20 个闭合候选、30 个非闭合 mesh 的 `manifest-balanced50.json`、加载审计，以及 `g0-a1a2-r128-cpu-v1/summary.json`。点击样本时才通过 SSH 调用远端只读辅助脚本。页面使用 WebGL 2，不需要本机安装 vae3d、Open3D 或 CUDA。按 `Ctrl+C` 停止服务。
 
-默认 `balanced50` 清单还读取 `g0b-a4-r128-v1/summary.json`。主页面点 **“打开 G0b MC / FlexiCubes 对比”**，或在本地服务地址后加 `/compare?index=7`，可直接查看指定的零起点清单 index。对比页有两种模式：
+默认 `balanced50` 清单还读取 `g0b-a4-r128-v1/summary.json`。主页面点 **“打开 G0 四路线 2×5 对比”**，或在本地服务地址后加 `/compare?index=7`。该页两行分别为 classic MC 与 FlexiCubes，五列为原 mesh、A1、A2、A3、A4；顶栏的 flat/smooth 选择会加载对应独立拟合缓存，A1/A2 保持共用字段。A1–A4 可按列隐藏，显示着色是单独选项。当前新结果位于 `g0-four-route-r128-v5`，固定 50 件已完成。旧 G0b 同一 A4 场换提取器的历史网格已于 2026-10-31 清理，指标仍见 G0b 报告；`/compare/legacy` 不再作为可用预览入口。其原两种视图模式为：
 
 - **三视窗并排**：原 mesh 灰白、A4 classic MC 蓝色、A4 FlexiCubes 橙色。三个视窗使用源 mesh 的同一居中/缩放和同步相机；在任一视窗旋转、平移或缩放，其他视窗同步。
 - **MC / FlexiCubes 叠加**：蓝色 MC 作为底图、橙色 FlexiCubes 以可调透明度覆盖。可切换线框以找轮廓、薄结构和局部缺失；这是显示效果，不是误差热图。
@@ -17,9 +17,11 @@
 
 左侧按零起点清单 index 或文件名搜索；优先检查 G0b Chamfer 回退较大的 index `7、46、11、40、0`。详情区列出 A0 标志、A4 倒置穿越 cell 数、面数、Chamfer、F-score 和边界边数。Chamfer 是原 mesh 坐标单位，差值为 FlexiCubes 减 MC。A0 标志及倒置 cell 数不等于人工质量结论。对比页按需读取远端 G0b 已缓存的两份 `*_raw_mesh.ply`，不重新生成场或运行网络。
 
-G0b 对比页默认传输简化目标约 6000 面的显示预览（部分拓扑会保留更多面），以缩短慢速 SSH 连接上的等待时间；顶部“显示精度”可切换到原始提取网格。预览由远端缓存临时简化并压缩传输，不覆盖缓存，也不参与页面列出的原精度评测指标。切换清单 index 后首次生成预览仍需等待十几秒到数十秒；原精度传输可能需要几分钟。单次打开一份服务即可，固定端口可用 `./view_g0_meshes.command --no-browser --port 8765`，页面入口为 `http://127.0.0.1:8765/compare?index=7`。
+两个对比页默认传输简化目标约 6000 面的显示预览（部分拓扑会保留更多面），以缩短慢速 SSH 连接上的等待时间；可切换到原始提取网格。预览由远端缓存临时简化并压缩传输，不覆盖缓存，也不参与页面列出的原精度评测指标。切换清单 index 后首次生成预览仍需等待十几秒到数十秒；原精度传输可能需要几分钟。单次打开一份服务即可，固定端口可用 `./view_g0_meshes.command --no-browser --port 8765 --four-route-root /data/hi3d/g0-prep/g0-four-route-r128-v5`。
 
 固定 50 件可一次性建立本地压缩预览快照，之后重启浏览器时加 `--preview-cache`，启动和 G0b 快速预览均不需要 SSH；原精度模式、主页面的 A1/A2 场及未缓存输入仍按需通过 SSH 读取。缓存目录默认在 `.local-cache/`，已加入 `.gitignore`，不影响远端结果：
+
+2026-10-31 起，G0b 原 PLY 已清理，旧 `--preview-cache .local-cache/g0b-preview-v1` 启动方式不可用。当前四路线页面用独立的 `.local-cache/four-route-preview-v1` 按需持久缓存简化网格，不要求 G0b 快照。启动命令为 `python3 -m experiments.vae_sdf.view_meshes --dataset balanced50 --port 8765 --no-browser --four-route-root /data/hi3d/g0-prep/g0-four-route-r128-v5`；首次打开新资产较慢，之后本地命中。以下旧 G0b 快照命令仅作历史记录。
 
 ```bash
 ./view_g0_meshes.command --no-browser --port 8765
@@ -45,10 +47,11 @@ python3 -m experiments.vae_sdf.cache_g0b_previews --workers 3
   --remote-python /path/to/python
 ./view_g0_meshes.command --batch-root /path/to/g0-a1a2-r128-cpu-v1
 ./view_g0_meshes.command --g0b-root /path/to/g0b-a4-r128-v1
+./view_g0_meshes.command --four-route-root /path/to/g0-four-route-r128-v5
 ```
 
-远端辅助脚本是 `experiments/vae_sdf/remote_mesh.py`、`remote_target.py`、`remote_g0b_mesh.py` 和 `remote_g0b_bundle.py`，副本位于 `/data/hi3d/g0-prep/experiments/vae_sdf/`；不会修改远端 hi3d-vae-field 仓库。它们按固定清单索引读取输入 mesh、A1/A2 缓存或 G0b 原始提取网格，并核对批量目录及资产身份。服务不接受网页传入任意远端路径。`--dataset usable50/first50` 仍只显示输入 mesh，因为这两份清单没有配套的 A1/A2 或 G0b 固定批量缓存。
+远端辅助脚本包括 `experiments/vae_sdf/remote_mesh.py`、`remote_target.py`、`remote_g0b_mesh.py`、`remote_g0b_bundle.py` 与 `remote_four_route.py`。四路线辅助脚本已复制到远端 `/data/hi3d/hi3d-vae-field/experiments/vae_sdf/`，未提交；其余历史辅助脚本按此前部署在 `/data/hi3d/g0-prep/experiments/vae_sdf/`。服务按固定清单索引读取，浏览器不能传入任意远端路径。`--dataset usable50/first50` 仍只显示输入 mesh，因为这两份清单没有配套的固定批量缓存。
 
-此工具参考 vae3d 的 `view_train_t1.bat` 的本地浏览器工作方式，但**不加载 T1 checkpoint、不评估 VAE、不重新生成场**。主页面查看已缓存的 G0 输入、A1/A2 场与零面；对比页查看 A4 场经 G0b 接口提取的两份网格。A0、A3 场及 A4 场切片尚无完整批量视图。
+此工具参考 vae3d 的 `view_train_t1.bat` 的本地浏览器工作方式，但**不加载 T1 checkpoint、不评估 VAE、不重新生成场**。主页面查看已缓存的 G0 输入、A1/A2 场与零面；新对比页按需查看四路线 A3/A4 网格，历史对比页查看同一 A4 场经 G0b 接口提取的两份网格。A0、A3 场及 A4 场切片尚无完整批量视图。
 
 预览所用几何由 vae3d `load_mesh` 读取并验证，随后恢复到输入坐标系；浏览器只为显示自动居中缩放。它不是完全未经处理的原始文件字节，也不应用于数值评测。默认清单含 20 个 `is_watertight` 闭合候选与 30 个非闭合 mesh；闭合仅为拓扑预筛，尚未证明 A0 符号可靠。`--dataset usable50` 保留原始首 50 个文件中成功的 42 个与补入的 8 个；原始首 50 的 8 个失败仍保留在 `--dataset first50` 和原加载审计中。

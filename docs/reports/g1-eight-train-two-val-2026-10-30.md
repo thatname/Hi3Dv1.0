@@ -2,6 +2,8 @@
 
 日期：2026-10-30。固定 50 清单内训练编号 `48,5,35,2,20,37,44,7`，验证编号 `0,30`；资产及 manifest 哈希固定在 [split 配置](../../experiments/vae_sdf/configs/g1-eight-train-two-val-v1.json)。两验证资产未参与此轮 400 步优化。模型为随机初始化的 vae3d 结构编码器、Hi3D 预训练解码骨干和新连续头；R128、A4 成对场与位移、GT 子支撑、`β=0`。验证时分别用 GT 和预测子支撑提取原坐标 raw mesh。预测子支撑仍使用 GT 粗 latent 坐标，不能视为完全自主生成。
 
+2026-10-31 清理说明：此轮及其他旧 R128/A4 G1 运行共 14 个 `.pt` checkpoint 已按用户清理要求删除；以下 checkpoint 路径只作为历史运行证据，不再可用于恢复。`trace.json`、`resolved_config.json`、评测报告和日志保留。后续 `flexicubes_smooth` 路线须重新训练。
+
 ## 运行与证据
 
 - 远端训练：`/data/hi3d/g0-prep/g1-a4-eight-train-step400-v1/`，`resolved_config.json` 状态 `completed`，`trace.json` 400 条；第 200/400 步与最终 checkpoint 均在该目录。400 步耗时 176.8 秒，PyTorch CUDA peak allocated 16.17 GB，不含外部进程。

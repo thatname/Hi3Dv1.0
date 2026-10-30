@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import struct
 import subprocess
@@ -19,11 +20,13 @@ import zlib
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 from urllib.parse import parse_qs, urlsplit
 
 
 HTML = Path(__file__).with_name("mesh_browser.html")
 COMPARE_HTML = Path(__file__).with_name("g0b_compare.html")
+FOUR_ROUTE_HTML = Path(__file__).with_name("four_route_compare.html")
 
 
 class RemoteSource:
@@ -114,6 +117,22 @@ class RemoteSource:
             raise ValueError("Incomplete G0b mesh bundle")
         return payload
 
+    def four_route(self, index: int, root: str, kind: str, route: str = "mc_flat",
+                   stage: str = "source", preview_faces: int = 6000) -> bytes:
+        if (not 0 <= index < 50 or kind not in {"catalog", "mesh"}
+                or route not in {"mc_flat", "mc_smooth", "flexicubes_flat", "flexicubes_smooth"}
+                or stage not in {"source", "A1", "A2", "A3", "A4"}
+                or preview_faces not in {0, 6000}):
+            raise ValueError("Invalid fixed four-route request")
+        library_paths = ":".join((f"{self.root}/vendor-a4", f"{self.root}/vendor-a3-compat",
+                                  f"{self.root}/vendor-a3", f"{self.root}/vendor-full",
+                                  f"{self.root}/vae3d", self.root.rsplit("/", 1)[0] + "/hi3d-vae-field", self.root))
+        return self.run(["env", f"PYTHONPATH={library_paths}", self.python,
+            "-m", "experiments.vae_sdf.remote_four_route", "--root", root,
+            "--manifest", f"{self.root}/{self.manifest_name}", "--index", str(index),
+            "--kind", kind, "--route", route, "--stage", stage,
+            "--preview-faces", str(preview_faces)])
+
 
 def catalog(manifest: dict, audit: dict, batch: dict | None = None,
             g0b: dict | None = None) -> dict:
@@ -184,7 +203,10 @@ def catalog(manifest: dict, audit: dict, batch: dict | None = None,
 
 
 def handler_for(source: RemoteSource, data: dict, g0b_root: str | None = None,
-                preview_cache: Path | None = None):
+                preview_cache: Path | None = None, four_route_root: str | None = None,
+                four_route_preview_cache: Path | None = None):
+    four_route_catalogs = {}
+    catalog_lock = Lock()
     @lru_cache(maxsize=2)
     def mesh(index: int) -> bytes:
         return source.mesh(index)
@@ -214,6 +236,24 @@ def handler_for(source: RemoteSource, data: dict, g0b_root: str | None = None,
     def g0b_full_bundle(index: int) -> bytes:
         return source.g0b_bundle(index, g0b_root, 0)
 
+    @lru_cache(maxsize=80)
+    def four_route_mesh(index: int, route: str, stage: str,
+                        preview_faces: int, mesh_sha256: str) -> bytes:
+        local = None
+        if four_route_preview_cache is not None and preview_faces:
+            local = (four_route_preview_cache /
+                     f"R128-phase0.5_{index}_{route}_{stage}_{mesh_sha256}.bin")
+            if local.is_file():
+                return local.read_bytes()
+        body = zlib.decompress(source.four_route(index, four_route_root, "mesh", route, stage,
+                                                preview_faces))
+        if local is not None:
+            local.parent.mkdir(parents=True, exist_ok=True)
+            partial = local.with_suffix(".partial")
+            partial.write_bytes(body)
+            partial.replace(local)
+        return body
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             request = urlsplit(self.path)
@@ -221,8 +261,47 @@ def handler_for(source: RemoteSource, data: dict, g0b_root: str | None = None,
             try:
                 if path == "/":
                     body, mime = HTML.read_bytes(), "text/html; charset=utf-8"
-                elif path == "/compare" and data["has_g0b"]:
+                elif path == "/compare" and four_route_root is not None:
+                    body, mime = FOUR_ROUTE_HTML.read_bytes(), "text/html; charset=utf-8"
+                elif path == "/compare/legacy" and data["has_g0b"]:
                     body, mime = COMPARE_HTML.read_bytes(), "text/html; charset=utf-8"
+                elif path.startswith("/api/four-route/catalog/") and four_route_root is not None:
+                    value = path.rsplit("/", 1)[-1]
+                    if not value.isdigit() or int(value) >= len(data["rows"]):
+                        self.send_error(404)
+                        return
+                    body = source.four_route(int(value), four_route_root, "catalog")
+                    with catalog_lock:
+                        four_route_catalogs[int(value)] = json.loads(body)
+                    mime = "application/json"
+                elif path.startswith("/api/four-route/mesh/") and four_route_root is not None:
+                    parts = path.strip("/").split("/")
+                    if (len(parts) != 7 or not parts[3].isdigit()
+                            or int(parts[3]) >= len(data["rows"])
+                            or parts[4] not in {"mc_flat", "mc_smooth", "flexicubes_flat", "flexicubes_smooth"}
+                            or parts[5] not in {"source", "A1", "A2", "A3", "A4"}
+                            or parts[6] not in {"preview", "full"}):
+                        self.send_error(404)
+                        return
+                    index, route, stage = int(parts[3]), parts[4], parts[5]
+                    query = parse_qs(request.query)
+                    expected = query.get("sha", [""])[0]
+                    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+                        self.send_error(400, "Missing mesh SHA256")
+                        return
+                    with catalog_lock:
+                        current = four_route_catalogs.get(index)
+                    if current is None:
+                        self.send_error(409, "Load four-route catalog first")
+                        return
+                    metadata = ({"status": "ready", "sha256": current["source_sha256"]}
+                                if stage == "source" else current["cells"][route][stage])
+                    if metadata.get("status") != "ready" or metadata.get("sha256") != expected:
+                        self.send_error(409, "Mesh identity changed; refresh catalog")
+                        return
+                    body = four_route_mesh(index, route, stage,
+                                           6000 if parts[6] == "preview" else 0, expected)
+                    mime = "application/octet-stream"
                 elif path == "/api/catalog":
                     body, mime = json.dumps(data, ensure_ascii=False).encode(), "application/json"
                 elif path.startswith("/bundle/") and data["has_g0b"]:
@@ -322,8 +401,12 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--batch-root", help="Remote A1/A2 batch root for balanced50")
     parser.add_argument("--g0b-root", help="Remote G0b batch root for balanced50")
+    parser.add_argument("--four-route-root", help="Remote independent four-route batch root")
     parser.add_argument("--preview-cache", type=Path,
                         help="Local snapshot with catalog.json and compressed G0b preview bundles")
+    parser.add_argument("--four-route-preview-cache", type=Path,
+                        default=Path(".local-cache/four-route-preview-v1"),
+                        help="Independent local cache for four-route simplified meshes")
     args = parser.parse_args()
     if args.timeout < 1 or not 0 <= args.port <= 65535:
         parser.error("timeout must be positive and port must be in 0..65535")
@@ -343,7 +426,9 @@ def main() -> int:
         g0b = source.g0b_summary(g0b_root) if args.dataset == "balanced50" else None
         data = catalog(source.json_file(source.manifest_name), source.json_file(source.audit_name), batch, g0b)
     server = ThreadingHTTPServer(("127.0.0.1", args.port),
-                                 handler_for(source, data, g0b_root, args.preview_cache))
+                                 handler_for(source, data, g0b_root, args.preview_cache,
+                                             args.four_route_root or f"{source.root}/g0-four-route-r128-v2",
+                                             args.four_route_preview_cache))
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"G0 mesh viewer: {url} — {len(data['rows'])} assets. Ctrl+C to stop.", flush=True)
     if not args.no_browser:

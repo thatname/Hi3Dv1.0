@@ -49,7 +49,7 @@
 <body>
   <aside>
     <header>
-      <h1>G0b 网格对比</h1>
+      <h1>G0b 历史同场提取对比</h1>
       <div class="muted"><a href="/">返回 G0 浏览器</a> · 原坐标系、无清理的提取网格</div>
       <div id="count" class="muted">加载清单中…</div>
       <input id="search" type="search" placeholder="搜索文件名或清单 index">
@@ -256,7 +256,7 @@
     }
     async function select(index){
       selected=index;const myToken=++token,row=rows[index];
-      history.replaceState(null,'',`/compare?index=${index}`);
+      history.replaceState(null,'',`/compare/legacy?index=${index}`);
       camera.yaw=0.5;camera.pitch=0.25;camera.distance=2.3;camera.panX=0;camera.panY=0;
       clearBuffers();frame=null;for(const key of Object.keys(meshes))meshes[key]=null;
       const full=$('quality').value==='full';
