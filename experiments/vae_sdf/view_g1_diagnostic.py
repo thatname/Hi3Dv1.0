@@ -1,4 +1,9 @@
-"""Serve fixed G1 index 0/7 field slices from remote diagnostic artifacts."""
+"""Serve field slices from one remote diagnostic export directory.
+
+The asset list is no longer fixed: pass --root and --indices to point the viewer
+at any export produced by the field-diagnostic exporter. Defaults keep the
+original index 0/7 step-1000 behaviour.
+"""
 
 from __future__ import annotations
 
@@ -12,20 +17,34 @@ from urllib.parse import urlsplit
 
 HTML = Path(__file__).with_name("g1_field_diagnostic.html")
 REMOTE_ROOT = "/data/hi3d/g1/field-diagnostic-0-7-step1000-v1"
+DEFAULT_INDICES = (0, 7)
 
 
-def handler_for(host: str, timeout: int):
+def asset_options(indices, val_indices) -> str:
+    roles = {0: "验证集", 1: "训练集"}
+    return "\n".join(
+        f'<option value="{index}">{index} · {roles[0 if index in set(val_indices) else 1]}</option>'
+        for index in indices)
+
+
+def handler_for(host: str, timeout: int, root: str = REMOTE_ROOT,
+                indices=DEFAULT_INDICES, val_indices=()):
+    allowed = {int(index) for index in indices}
+    options = asset_options(indices, val_indices)
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             path = urlsplit(self.path).path
             try:
                 if path == "/":
-                    body, mime, encoding = HTML.read_bytes(), "text/html; charset=utf-8", None
-                elif path in {"/api/slice/0", "/api/slice/7"}:
-                    index = path.rsplit("/", 1)[-1]
+                    body = HTML.read_bytes().replace(b"{{ASSET_OPTIONS}}", options.encode())
+                    mime, encoding = "text/html; charset=utf-8", None
+                elif path.startswith("/api/slice/") and path.rsplit("/", 1)[-1].isdigit() \
+                        and int(path.rsplit("/", 1)[-1]) in allowed:
+                    index = int(path.rsplit("/", 1)[-1])
                     result = subprocess.run(
                         ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                         host, f"cat {REMOTE_ROOT}/index{int(index):02d}_slice.json.gz"],
+                         host, f"cat {root}/index{index:02d}_slice.json.gz"],
                         capture_output=True, timeout=timeout, check=False)
                     if result.returncode:
                         raise RuntimeError(result.stderr.decode("utf-8", "replace")[:300])
@@ -58,8 +77,16 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8768)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--root", default=REMOTE_ROOT,
+                        help="Remote directory holding indexNN_slice.json.gz exports")
+    parser.add_argument("--indices", type=int, nargs="+", default=list(DEFAULT_INDICES),
+                        help="Assets offered in the page's selector")
+    parser.add_argument("--val-indices", type=int, nargs="*", default=[0],
+                        help="Indices shown as held-out validation in the selector")
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(args.host, args.timeout))
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", args.port),
+        handler_for(args.host, args.timeout, args.root, args.indices, args.val_indices))
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"G1 field diagnostic: {url}. Ctrl+C to stop.", flush=True)
     if not args.no_browser:
