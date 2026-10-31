@@ -55,14 +55,16 @@ def save_checkpoint(path: Path, model, optimizer, step: int, report: dict) -> No
     temporary.replace(path)
 
 
-def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, device: str):
+def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, device: str,
+               expect_resolution: int = 128):
     asset, row = manifest["assets"][index], rows[index]
     if row["index"] != index or row["id"] != asset["id"] or row["status"] != "success":
         raise ValueError("A4 summary and fixed manifest disagree")
     cache = Path(row["cache"])
     config = json.loads((Path(row.get("config_root", cache)) / "resolved_config.json").read_text())
     if (config["asset_id"] != asset["id"] or config["manifest_sha256"] != manifest_hash
-            or config["resolution"] != 128 or config["sampling_offset"] != 0.5
+            or config["resolution"] != expect_resolution
+            or config["sampling_offset"] != 0.5
             or (row.get("route_id") and (config.get("route_id") != ROUTE
                 or config.get("extractor") != "flexicubes"
                 or config.get("normal_mode") != "smooth"
@@ -80,7 +82,7 @@ def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, devic
                 or str(target["field_units"]) != "fine_voxel"
                 or str(target["delta_units"]) != "fine_voxel"):
             raise ValueError("Four-route A4 target metadata differs from G1 protocol")
-    if resolution != 128 or phase != 0.5 or np.max(np.abs(features[:, 1:])) > .50001:
+    if resolution != expect_resolution or phase != 0.5 or np.max(np.abs(features[:, 1:])) > .50001:
         raise ValueError("A4 target resolution, phase, or voxel delta is invalid")
     pack_target(coords, features, cells, indices, resolution)
     hi_indices = indices[:, HI3D_FROM_VAE]
@@ -136,6 +138,8 @@ def main() -> int:
     p.add_argument("--indices", type=int, nargs="+", default=[48, 5])
     p.add_argument("--split", type=Path, help="Fixed asset-level split; indices must match its train role")
     p.add_argument("--steps", type=int, default=12)
+    p.add_argument("--resolution", type=int, choices=(128, 256), default=128,
+                   help="Fine-grid resolution of the target caches")
     p.add_argument("--stage", choices=("G1", "G2"), default="G1",
                    help="Experiment stage recorded in the resolved config and checkpoints")
     p.add_argument("--lr", type=float, default=1e-4)
@@ -169,7 +173,8 @@ def main() -> int:
     training_schema = "g1_four_route_v1" if four_route else "g1_a4_overfit_v2"
     summary_hash_key = "paired_summary_sha256" if four_route else "a4_summary_sha256"
     split_hash = check_split(args.split, manifest, manifest_hash, "train", args.indices) if args.split else None
-    assets = [load_asset(i, manifest, rows, manifest_hash, device) for i in args.indices]
+    assets = [load_asset(i, manifest, rows, manifest_hash, device, args.resolution)
+              for i in args.indices]
     pretrained = load_sparconv_vae(args.weights, device=device)
     model = G1VAE(pretrained.decoder).to(device).train()
     # The released sign/distance head is retained only for exact backbone loading.
@@ -233,6 +238,7 @@ def main() -> int:
         "code_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "code_sha256": {name: sha256(Path(__file__).parent / name) for name in
                         ("train_g1.py", "g1_model.py", "g0b_field_adapter.py")},
+        "resolution": args.resolution,
         "torch_version": torch.__version__, "gpu": torch.cuda.get_device_name(0),
         "assets": [{k: v for k, v in a.items() if not isinstance(v, torch.Tensor)} for a in assets],
         "trace": prior_trace,
@@ -244,8 +250,8 @@ def main() -> int:
             asset = assets[step % len(assets)]
             optimizer.zero_grad(set_to_none=True)
             cells, signed, delta, occupancy, mean, logvar = model(
-                asset["coords"], asset["features"], asset["cells"], 128)
-            target_rows = _rows(asset["cells"], cells, 128)
+                asset["coords"], asset["features"], asset["cells"], args.resolution)
+            target_rows = _rows(asset["cells"], cells, args.resolution)
             weights = asset["weight"][target_rows]
             target_field = asset["field"][target_rows]
             if args.truncation > 0:

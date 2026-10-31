@@ -74,6 +74,8 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=20261030)
     parser.add_argument("--max-predicted-sites", type=int, default=2_000_000)
+    parser.add_argument("--resolution", type=int, choices=(128, 256), default=128,
+                        help="Fine-grid resolution of the target caches")
     parser.add_argument("--support-threshold", type=float, default=0.0,
                         help="Logit threshold for the self-predicted support; 0.0 is Hi3D's "
                              "original rule and reproduces the trained behaviour")
@@ -120,6 +122,7 @@ def main() -> int:
         "split_sha256": split_hash, "split_role": args.role if args.split else None,
         "max_predicted_sites": args.max_predicted_sites,
         "support_threshold": args.support_threshold,
+        "resolution": args.resolution,
         "support_condition": "GT coarse latent coordinates; compare GT versus predicted child support",
         "mesh_protocol": ("FlexiCubes" if four_route else "vae3d classic MC")
             + ", sampling_offset=0.5; original coordinates; no cleanup or renormalization",
@@ -128,7 +131,7 @@ def main() -> int:
     write_json(args.output / "report.json", report)
     for index in args.indices:
         started = time.perf_counter()
-        asset = load_asset(index, manifest, rows, manifest_hash, "cuda:0")
+        asset = load_asset(index, manifest, rows, manifest_hash, "cuda:0", args.resolution)
         source_path = Path(manifest["assets"][index]["path"])
         if sha256(source_path) != manifest["assets"][index]["sha256"]:
             raise ValueError(f"Source hash changed at index {index}")
@@ -157,22 +160,22 @@ def main() -> int:
             for name, predicted in (("gt_support", False), ("predicted_support", True)):
                 try:
                     cells, signed, delta, _, mean, logvar = model(
-                        asset["coords"], asset["features"], asset["cells"], 128,
+                        asset["coords"], asset["features"], asset["cells"], args.resolution,
                         predicted_support=predicted, max_sites=args.max_predicted_sites,
                         support_threshold=args.support_threshold if predicted else 0.0)
-                    support = _support_stats(cells, asset["cells"], 128)
+                    support = _support_stats(cells, asset["cells"], args.resolution)
                     entry = {"status": "success", "support": support,
                              "latent_sites": len(mean),
                              "kl_diagnostic": float(0.5 * (
                                  mean.square() + logvar.exp() - 1 - logvar).mean())}
                     if not predicted:
-                        target_rows = _rows(asset["cells"], cells, 128)
+                        target_rows = _rows(asset["cells"], cells, args.resolution)
                         weight = asset["weight"][target_rows]
                         field_error = (signed - asset["field"][target_rows]).abs()
                         delta_error = (delta - asset["delta"][target_rows]).abs().mean(-1)
                         entry["field_mae_unique_weighted"] = float((field_error * weight).sum() / weight.sum())
                         entry["delta_mae_unique_weighted"] = float((delta_error * weight).sum() / weight.sum())
-                    mesh = _raw_mesh(cells, signed, delta, center, scale, 128,
+                    mesh = _raw_mesh(cells, signed, delta, center, scale, args.resolution,
                                      four_route=four_route)
                     entry["mesh_file"] = f"{index:02d}_{name}_raw.ply"
                     mesh.export(args.output / entry["mesh_file"])

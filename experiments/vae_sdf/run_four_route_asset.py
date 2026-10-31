@@ -14,6 +14,7 @@ from .preflight import VAE3D_COMMIT, sha256
 
 
 SCHEMA = "g0_four_route_r128_v1"
+SUPPORTED_RESOLUTIONS = (128, 256)
 GPU_WHITELIST = (1, 2, 3, 7)
 
 
@@ -90,8 +91,9 @@ def run(args):
         raise ValueError(
             f"Four-route run needs one whitelisted physical GPU {GPU_WHITELIST} "
             "mapped to cuda:0 via CUDA_VISIBLE_DEVICES")
-    if args.route not in ROUTES or args.resolution != 128 or args.a3_steps < 1 or args.a4_steps < 1:
-        raise ValueError("Unsupported route or fit budget")
+    if (args.route not in ROUTES or args.resolution not in SUPPORTED_RESOLUTIONS
+            or args.a3_steps < 1 or args.a4_steps < 1):
+        raise ValueError(f"Unsupported route or resolution {args.resolution}")
     if args.image_resolution < 32 or args.metric_samples < 1 or args.seed < 0:
         raise ValueError("Invalid render/evaluation configuration")
     extractor, normal_mode = ROUTES[args.route]
