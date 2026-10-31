@@ -14,6 +14,16 @@ from .preflight import VAE3D_COMMIT, sha256
 
 
 SCHEMA = "g0_four_route_r128_v1"
+GPU_WHITELIST = (1, 2, 3, 7)
+
+
+def physical_gpu() -> int:
+    """Physical GPU this process was mapped onto; it never enters the cache key."""
+    value = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if value.strip() not in {str(card) for card in GPU_WHITELIST}:
+        raise ValueError(
+            f"CUDA_VISIBLE_DEVICES must name exactly one of {GPU_WHITELIST}, got {value!r}")
+    return int(value.strip())
 ROUTES = {
     "mc_flat": ("mc", "flat"), "mc_smooth": ("mc", "smooth"),
     "flexicubes_flat": ("flexicubes", "flat"),
@@ -76,8 +86,10 @@ def run(args):
     from .four_route_a4 import fit_a4
     from .evaluate_initial_targets import mesh_metrics, sample_surface, scene_for
 
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != "7" or args.device != "cuda:0":
-        raise ValueError("Four-route run is pinned to physical GPU 7 (CUDA_VISIBLE_DEVICES=7, cuda:0)")
+    if args.device != "cuda:0" or physical_gpu() not in GPU_WHITELIST:
+        raise ValueError(
+            f"Four-route run needs one whitelisted physical GPU {GPU_WHITELIST} "
+            "mapped to cuda:0 via CUDA_VISIBLE_DEVICES")
     if args.route not in ROUTES or args.resolution != 128 or args.a3_steps < 1 or args.a4_steps < 1:
         raise ValueError("Unsupported route or fit budget")
     if args.image_resolution < 32 or args.metric_samples < 1 or args.seed < 0:
@@ -144,7 +156,8 @@ def run(args):
         "views": 32, "held_out_views": 12, "seed": args.seed,
         "metric_samples": args.metric_samples, "delta_limit": .5,
         "allow_sign_changes_a4": True, "target_thickness_pixels": 1., "depth_weight": 10.,
-        "physical_gpu": 7, "logical_device": args.device,
+        # The physical card is recorded in audit.json, never in this hashed config:
+        # the same protocol must keep one cache identity whichever GPU ran it.
         "torch_version": torch.__version__,
         "hi3d_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "vae3d_commit": subprocess.check_output(["git", "-C", str(args.vae3d_root), "rev-parse", "HEAD"], text=True).strip(),
@@ -199,6 +212,7 @@ def run(args):
             threshold_fractions=(.005, .01), reference_points=reference_points,
             reference_normals=reference_normals, reference_scene=reference_scene)
         audit = {"stage": stage.upper(), "route_id": args.route,
+                 "physical_gpu": physical_gpu(), "logical_device": args.device,
                  "seconds": seconds, "peak_cuda_allocated_bytes": int(torch.cuda.max_memory_allocated()),
                  "peak_cuda_reserved_bytes": int(torch.cuda.max_memory_reserved()),
                  "grid_quality": grid_quality(fitted), "faces": len(raw_mesh.faces),

@@ -17,8 +17,8 @@ def main():
     parser.add_argument("--metric-samples", type=int, default=4096)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != "7":
-        raise ValueError("Pinned to physical GPU 7")
+    if os.environ.get("CUDA_VISIBLE_DEVICES", "").strip() not in {"1", "2", "3", "7"}:
+        raise ValueError("Shared extraction needs one whitelisted physical GPU (1/2/3/7)")
     import numpy as np
     import torch
     import trimesh

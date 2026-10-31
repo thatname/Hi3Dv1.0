@@ -29,7 +29,8 @@ def main():
     args = parser.parse_args()
     assets = json.loads(args.manifest.read_text())["assets"]
     status = json.loads((args.root / "batch-status.json").read_text())
-    if not assets or status["identity"]["indices"] != list(range(len(assets))):
+    covered = status.get("indices", status["identity"].get("indices", []))
+    if not assets or list(covered) != list(range(len(assets))):
         raise ValueError("Batch status must cover every manifest asset in order")
     routes = tuple(status["identity"]["routes"])
     if (not routes or len(set(routes)) != len(routes)
