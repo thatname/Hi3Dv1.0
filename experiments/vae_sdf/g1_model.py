@@ -142,7 +142,6 @@ class TrainableHi3DDecoder(nn.Module):
         point.serialization(order=self.backbone.order)
         point = self.backbone.mid(point)
         occupancy_losses = []
-        stage_index = 0
         for stage in self.backbone.dec._modules.values():
             for module in stage._modules.values():
                 if not hasattr(module, "upsample"):
@@ -152,12 +151,12 @@ class TrainableHi3DDecoder(nn.Module):
                 logits = unpool.cls_head(point).feat.reshape(-1)
                 if predicted_support:
                     flat = torch.nonzero(logits > 0, as_tuple=True)[0]
-                    if support_dilation and stage_index == len(self.backbone.dec._modules) - 1:
-                        # Keep every sibling of a selected cell: the whole 2x2x2 block of
-                        # its parent. This gives the zero surface a one-cell margin instead
-                        # of cutting it at the support edge. Inference only.
+                    if support_dilation:
                         if not 0 <= support_dilation <= 2:
                             raise ValueError("support_dilation must be 0, 1 or 2")
+                        # Applied at every upsampling level so the extra margin
+                        # propagates to the finer grids; the last level alone cannot
+                        # grow past the parent set it inherited.
                         parents = torch.unique(torch.div(flat, 8, rounding_mode="floor"))
                         if support_dilation == 2:
                             parents = _dilate_parents(parents, point.grid_coord, point.resolution)
@@ -188,7 +187,6 @@ class TrainableHi3DDecoder(nn.Module):
                     offset=torch.tensor([len(child)], device=child.device),
                 )
                 point.sparsify()
-                stage_index += 1
         if point.feat.shape[0] > 12_000_000:
             raise RuntimeError("Training would silently skip a residual block")
         point = self.head(point)
