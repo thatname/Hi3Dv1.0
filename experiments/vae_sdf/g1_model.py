@@ -113,16 +113,7 @@ class TrainableHi3DDecoder(nn.Module):
         )
 
     def forward(self, latent, fine_cells: torch.Tensor, resolution: int,
-                *, predicted_support: bool = False, max_sites: int = 2_000_000,
-                support_dilation: int = 0):
-        """Decode a latent into per-corner field and deformation.
-
-        support_dilation only touches the self-predicted support and only the
-        finest level: 1 keeps every sibling of a selected cell (its parent's whole
-        2x2x2 block), 2 also includes children of face-adjacent parents. Either
-        way the added cells are produced by the decoder, never invented, and 0
-        preserves the trained behaviour exactly.
-        """
+                *, predicted_support: bool = False, max_sites: int = 2_000_000):
         if resolution % 8 or len(fine_cells) == 0:
             raise ValueError("G1 requires nonempty cells at a multiple-of-8 resolution")
         levels = [torch.unique(fine_cells // (2 ** power), dim=0)
@@ -151,17 +142,6 @@ class TrainableHi3DDecoder(nn.Module):
                 logits = unpool.cls_head(point).feat.reshape(-1)
                 if predicted_support:
                     flat = torch.nonzero(logits > 0, as_tuple=True)[0]
-                    if support_dilation:
-                        if not 0 <= support_dilation <= 2:
-                            raise ValueError("support_dilation must be 0, 1 or 2")
-                        # Applied at every upsampling level so the extra margin
-                        # propagates to the finer grids; the last level alone cannot
-                        # grow past the parent set it inherited.
-                        parents = torch.unique(torch.div(flat, 8, rounding_mode="floor"))
-                        if support_dilation == 2:
-                            parents = _dilate_parents(parents, point.grid_coord, point.resolution)
-                        flat = (parents[:, None] * 8
-                                + torch.arange(8, device=parents.device)).reshape(-1)
                     if len(flat) > max_sites:
                         raise RuntimeError("Predicted child support exceeds max_sites")
                     if len(flat) == 0:
@@ -196,22 +176,6 @@ class TrainableHi3DDecoder(nn.Module):
         return point.grid_coord, signed, delta, occupancy_losses
 
 
-def _dilate_parents(parents: torch.Tensor, grid: torch.Tensor, resolution: int) -> torch.Tensor:
-    """Rows of the face-adjacent parents of the given parent rows, within the grid."""
-    coords = grid[parents.long()]
-    offsets = torch.tensor(((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0),
-                            (0, 0, 1), (0, 0, -1)), device=coords.device, dtype=coords.dtype)
-    neighbours = (coords[:, None, :] + offsets[None, :, :]).reshape(-1, 3)
-    inside = ((neighbours >= 0) & (neighbours < int(resolution))).all(-1)
-    keys = _keys(torch.cat((parents.new_zeros((len(parents), 1)), coords), 1), int(resolution))
-    neighbour_keys = _keys(torch.cat((parents.new_zeros((len(neighbours), 1)), neighbours), 1),
-                           int(resolution))
-    known, order = keys.sort()
-    position = torch.searchsorted(known, neighbour_keys).clamp(max=len(known) - 1)
-    existing = inside & (known[position] == neighbour_keys)
-    return torch.unique(torch.cat((parents.long(), order[position][existing])))
-
-
 class G1VAE(nn.Module):
     def __init__(self, backbone: PTv3MeshDecoder):
         super().__init__()
@@ -219,13 +183,12 @@ class G1VAE(nn.Module):
         self.decoder = TrainableHi3DDecoder(backbone)
 
     def forward(self, unique_coords, features, fine_cells, resolution: int,
-                *, predicted_support: bool = False, max_sites: int = 2_000_000,
-                support_dilation: int = 0):
+                *, predicted_support: bool = False, max_sites: int = 2_000_000):
         x = Sparse(torch.cat((torch.zeros((len(unique_coords), 1), device=unique_coords.device,
                                           dtype=torch.int32), unique_coords.int()), 1),
                    features, resolution, sparsity_mode="full-band")
         latent, mean, logvar = self.encoder(x, fine_cells)
         cells, signed, delta, occupancy = self.decoder(
             latent, fine_cells, resolution, predicted_support=predicted_support,
-            max_sites=max_sites, support_dilation=support_dilation)
+            max_sites=max_sites)
         return cells, signed, delta, occupancy, mean, logvar
