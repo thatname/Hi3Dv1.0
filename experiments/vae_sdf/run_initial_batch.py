@@ -1,4 +1,9 @@
-"""Run and resume the fixed 50-asset G0 A1/A2 CPU baseline."""
+"""Run and resume the G0 A1/A2 CPU baseline for a fixed manifest.
+
+The manifest length is whatever the supplied file declares; the load audit must
+match it asset for asset. The original balanced-50 batch and any later extension
+(e.g. the 100-asset G2 pretest) therefore use the same code path.
+"""
 
 from __future__ import annotations
 
@@ -30,8 +35,8 @@ def load_inputs(args) -> tuple[list[dict], dict]:
     assets = json.loads(manifest_bytes)["assets"]
     audit_bytes = args.load_audit.read_bytes()
     audit = json.loads(audit_bytes)
-    if len(assets) != 50 or len(audit["assets"]) != 50 or audit["resolution"] != args.resolution:
-        raise ValueError("Expected the 50-asset load audit at this resolution")
+    if not assets or len(audit["assets"]) != len(assets) or audit["resolution"] != args.resolution:
+        raise ValueError("Manifest and load audit must match at this resolution")
     for index, (asset, checked) in enumerate(zip(assets, audit["assets"])):
         if (checked["index"] != index or checked["id"] != asset["id"]
                 or checked["path"] != asset["path"] or checked["status"] != "loaded"):
@@ -104,8 +109,13 @@ def summarize(assets: list[dict], result_root: Path, plan: dict) -> dict:
         json.dumps(plan, sort_keys=True).encode()).hexdigest(),
         "denominator": len(assets), "counts": counts, "assets": rows,
         "groups": {}}
-    for label, selection in (("all", rows), ("closed_candidate", rows[:20]),
-                             ("nonclosed", rows[20:])):
+    for label, selection in (
+        ("all", rows),
+        ("closed_candidate", [row for asset, row in zip(assets, rows)
+                              if asset.get("topology_candidate") == "watertight_candidate"]),
+        ("nonclosed", [row for asset, row in zip(assets, rows)
+                       if asset.get("topology_candidate") != "watertight_candidate"]),
+    ):
         complete = [row for row in selection if row["status"] == "success"]
         group = {"denominator": len(selection), "success": len(complete),
                  "failed": sum(row["status"] == "failed" for row in selection),
@@ -181,7 +191,7 @@ def run(args) -> dict:
         save_json(result_path, row)
         summary = summarize(assets, args.output_root, plan)
         save_json(args.output_root / "summary.json", summary)
-        print(f"{index + 1}/50 {row['status']} {asset['id']} {row['seconds']:.1f}s"
+        print(f"{index + 1}/{len(assets)} {row['status']} {asset['id']} {row['seconds']:.1f}s"
               + (f" {row['error']}" if row['status'] == "failed" else ""), flush=True)
     summary = summarize(assets, args.output_root, plan)
     save_json(args.output_root / "summary.json", summary)

@@ -13,14 +13,14 @@ def target_rows(path: Path, manifest: dict, *, four_route: bool) -> list[dict]:
     summary = json.loads(path.read_text())
     assets = manifest["assets"]
     rows = summary["assets"]
-    if len(assets) != 50 or len(rows) != 50:
-        raise ValueError("G1 requires the fixed balanced-50 target batch")
+    if not assets or len(assets) != len(rows):
+        raise ValueError("Manifest and target summary must list the same assets")
     if not four_route:
         return rows
     if (summary.get("schema") != "g0_four_route_paired_summary_v1"
-            or summary.get("paired_indices") != list(range(50))
+            or summary.get("paired_indices") != list(range(len(assets)))
             or Path(summary.get("root", "")).resolve() != path.parent.resolve()):
-        raise ValueError("Four-route summary is not the complete fixed-50 protocol")
+        raise ValueError("Four-route summary does not cover every manifest asset in order")
     selected = []
     for index, (asset, row) in enumerate(zip(assets, rows)):
         if (row["index"] != index or row["asset_id"] != asset["id"]

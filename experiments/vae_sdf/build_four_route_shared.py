@@ -28,11 +28,11 @@ def main():
 
     assets = json.loads(args.manifest.read_text())["assets"]
     rows = json.loads(args.a1a2_summary.read_text())["assets"]
-    if len(assets) != 50 or len(rows) != 50:
-        raise ValueError("Expected fixed balanced50 inputs")
+    if not assets or len(assets) != len(rows):
+        raise ValueError("Manifest and A1/A2 summary must list the same assets")
     failure_count = 0
     for index in args.indices:
-        if not 0 <= index < 50:
+        if not 0 <= index < len(assets):
             raise ValueError(index)
         asset, row = assets[index], rows[index]
         if (row["index"] != index or row["id"] != asset["id"]

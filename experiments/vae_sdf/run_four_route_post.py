@@ -40,12 +40,14 @@ def main():
     status["batch_counts"] = {kind: sum(x["status"] == kind for x in batch["runs"].values())
                               for kind in ("success", "failed")}
     save(status_path, status)
+    asset_count = len(json.loads(args.manifest.read_text())["assets"])
     commands = {
         "finite_difference": [sys.executable, "-m", "experiments.vae_sdf.four_route_probe",
-            "--a4-summary", str(args.a4_summary), "--index", "48", "--finite-difference"],
+            "--a4-summary", str(args.a4_summary),
+            "--index", str(min(48, asset_count - 1)), "--finite-difference"],
         "shared_a1a2": [sys.executable, "-m", "experiments.vae_sdf.build_four_route_shared",
             "--manifest", str(args.manifest), "--a1a2-summary", str(args.a1a2_summary),
-            "--output-root", str(args.root), "--indices", *map(str, range(50))],
+            "--output-root", str(args.root), "--indices", *map(str, range(asset_count))],
         "paired_summary": [sys.executable, "-m", "experiments.vae_sdf.summarize_four_route_batch",
             "--manifest", str(args.manifest), "--root", str(args.root),
             "--output", str(args.root / "paired-summary.json")],

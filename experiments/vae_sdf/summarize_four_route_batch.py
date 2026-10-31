@@ -1,4 +1,4 @@
-"""Audit fixed 50-asset four-route caches and summarize paired raw-mesh metrics."""
+"""Audit four-route caches for a fixed manifest and summarize paired raw-mesh metrics."""
 
 from __future__ import annotations
 
@@ -29,16 +29,18 @@ def main():
     args = parser.parse_args()
     assets = json.loads(args.manifest.read_text())["assets"]
     status = json.loads((args.root / "batch-status.json").read_text())
-    if len(assets) != 50 or status["identity"]["indices"] != list(range(50)):
-        raise ValueError("Expected the fixed balanced50 run")
-    if tuple(status["identity"]["routes"]) != ROUTES:
-        raise ValueError("Four-route order differs from the fixed protocol")
+    if not assets or status["identity"]["indices"] != list(range(len(assets))):
+        raise ValueError("Batch status must cover every manifest asset in order")
+    routes = tuple(status["identity"]["routes"])
+    if (not routes or len(set(routes)) != len(routes)
+            or any(route not in ROUTES for route in routes)):
+        raise ValueError("Batch status lists unsupported or duplicate routes")
     rows = []
     for index, asset in enumerate(assets):
         row = {"index": index, "asset_id": asset["id"], "source_sha256": asset["sha256"],
                "routes": {}}
         reference_config = None
-        for route in ROUTES:
+        for route in routes:
             run = status["runs"].get(f"{index}:{route}", {"status": "pending"})
             entry = {"status": run["status"], "log": run.get("log")}
             if run["status"] == "success":
@@ -67,15 +69,15 @@ def main():
             row["routes"][route] = entry
         rows.append(row)
     paired = [row for row in rows if all(row["routes"][route]["status"] == "success"
-                                          for route in ROUTES)]
+                                          for route in routes)]
     output = {"schema": "g0_four_route_paired_summary_v1", "root": str(args.root),
               "batch_finished": status.get("finished_at") is not None,
-              "total_assets": 50, "paired_assets": len(paired),
+              "total_assets": len(assets), "paired_assets": len(paired),
               "paired_indices": [row["index"] for row in paired],
-              "routes": {}, "assets": rows,
+              "routes_requested": list(routes), "routes": {}, "assets": rows,
               "normal_mode_comparison_note": "Training/held-out normal losses use each route's normal mode; do not rank them across modes without a common evaluator.",
               "self_intersection": "not_measured", "peak_driver_memory": "not_measured"}
-    for route in ROUTES:
+    for route in routes:
         successful = [row for row in rows if row["routes"][route]["status"] == "success"]
         def vals(key, stage="a4", population=paired):
             return [float(row["routes"][route][stage]["metrics"][key]) for row in population]

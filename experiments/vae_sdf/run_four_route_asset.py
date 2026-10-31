@@ -1,4 +1,4 @@
-"""Generate one independent A3/A4 route target from the fixed balanced50 A2 cache."""
+"""Generate one independent A3/A4 route target from a fixed A2 cache."""
 
 from __future__ import annotations
 
@@ -89,8 +89,9 @@ def run(args):
     assets = json.loads(manifest_bytes)["assets"]
     rows = json.loads(summary_bytes)["assets"]
     audits = json.loads(a0_bytes)["assets"]
-    if len(assets) != 50 or len(rows) != 50 or len(audits) != 50 or not 0 <= args.index < 50:
-        raise ValueError("Expected fixed balanced50 manifest and audits")
+    if (not assets or len(rows) != len(assets) or len(audits) != len(assets)
+            or not 0 <= args.index < len(assets)):
+        raise ValueError("Manifest, A1/A2 summary, and A0 audits must list the same assets")
     asset, row, a0 = assets[args.index], rows[args.index], audits[args.index]
     if (row["index"] != args.index or row["id"] != asset["id"]
             or row["status"] != "success" or row["source_sha256"] != asset["sha256"]
