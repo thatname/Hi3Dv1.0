@@ -156,9 +156,12 @@ def run(args) -> dict:
     else:
         save_json(plan_path, plan)
     target_root = args.output_root / "targets"
+    selected = set(args.indices) if args.indices else None
     for index, asset in enumerate(assets):
         if args.max_assets is not None and index >= args.max_assets:
             break
+        if selected is not None and index not in selected:
+            continue
         result_path = args.output_root / "assets" / f"{index:02d}.json"
         if result_path.exists():
             previous = json.loads(result_path.read_text())
@@ -210,6 +213,8 @@ def main() -> int:
     parser.add_argument("--max-sites", type=int, default=2_000_000)
     parser.add_argument("--verify-reference", action="store_true")
     parser.add_argument("--max-assets", type=int, help="Run only the first N assets for a smoke test")
+    parser.add_argument("--indices", type=int, nargs="+",
+                        help="Run only these manifest indices; every other asset stays pending")
     parser.add_argument("--retry-failed", action="store_true")
     args = parser.parse_args()
     summary = run(args)
