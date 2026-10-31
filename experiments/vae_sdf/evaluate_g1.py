@@ -111,6 +111,7 @@ def main() -> int:
         "checkpoint_step": config["steps"], "training_run": str(args.checkpoint.parent),
         "manifest_sha256": manifest_hash, summary_hash_key: sha256(summary_path),
         "target_route": ROUTE if four_route else "legacy_a4",
+        "stage": config.get("stage"),
         "weights_sha256": sha256(args.weights), "samples": args.samples, "seed": args.seed,
         "split": str(args.split) if args.split else None,
         "split_sha256": split_hash, "split_role": args.role if args.split else None,

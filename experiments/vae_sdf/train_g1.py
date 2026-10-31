@@ -1,4 +1,9 @@
-"""G1 A4 paired-field overfit smoke on the fixed balanced-50 manifest."""
+"""Staged VAE training on A4 paired-field targets.
+
+The module name is historical: it started as the G1 stage of the fixed
+balanced-50 protocol and now also trains the larger G2 asset sets. The declared
+experiment stage is carried in --stage and written to the resolved config.
+"""
 
 from __future__ import annotations
 
@@ -131,6 +136,8 @@ def main() -> int:
     p.add_argument("--indices", type=int, nargs="+", default=[48, 5])
     p.add_argument("--split", type=Path, help="Fixed asset-level split; indices must match its train role")
     p.add_argument("--steps", type=int, default=12)
+    p.add_argument("--stage", choices=("G1", "G2"), default="G1",
+                   help="Experiment stage recorded in the resolved config and checkpoints")
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--surface-weight", type=float, default=4.0)
     p.add_argument("--surface-sigma", type=float, default=1.0)
@@ -185,6 +192,10 @@ def main() -> int:
             "beta": 0, "teacher_forced_support": True,
             "split_sha256": split_hash,
         }
+        # Runs recorded before the stage field existed stay resumable; new runs
+        # are pinned to the declared experiment stage.
+        if "stage" in old:
+            expected["stage"] = args.stage
         mismatch = [key for key, value in expected.items() if old.get(key) != value]
         if mismatch or old.get("status") != "completed":
             raise ValueError(f"G1 checkpoint configuration mismatch: {mismatch}")
@@ -203,6 +214,7 @@ def main() -> int:
     args.output.mkdir(parents=True)
     report = {
         "schema": training_schema, "status": "running", "beta": 0,
+        "stage": args.stage,
         "target_route": ROUTE if four_route else "legacy_a4",
         "teacher_forced_support": True, "indices": args.indices,
         "steps": start_step + args.steps, "additional_steps": args.steps,
