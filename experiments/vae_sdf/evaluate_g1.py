@@ -74,6 +74,9 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=20261030)
     parser.add_argument("--max-predicted-sites", type=int, default=2_000_000)
+    parser.add_argument("--support-threshold", type=float, default=0.0,
+                        help="Logit threshold for the self-predicted support; 0.0 is Hi3D's "
+                             "original rule and reproduces the trained behaviour")
     args = parser.parse_args()
     if args.samples < 1 or args.max_predicted_sites < 1 or args.output.exists():
         parser.error("Invalid samples/site limit or output already exists")
@@ -116,6 +119,7 @@ def main() -> int:
         "split": str(args.split) if args.split else None,
         "split_sha256": split_hash, "split_role": args.role if args.split else None,
         "max_predicted_sites": args.max_predicted_sites,
+        "support_threshold": args.support_threshold,
         "support_condition": "GT coarse latent coordinates; compare GT versus predicted child support",
         "mesh_protocol": ("FlexiCubes" if four_route else "vae3d classic MC")
             + ", sampling_offset=0.5; original coordinates; no cleanup or renormalization",
@@ -154,7 +158,8 @@ def main() -> int:
                 try:
                     cells, signed, delta, _, mean, logvar = model(
                         asset["coords"], asset["features"], asset["cells"], 128,
-                        predicted_support=predicted, max_sites=args.max_predicted_sites)
+                        predicted_support=predicted, max_sites=args.max_predicted_sites,
+                        support_threshold=args.support_threshold if predicted else 0.0)
                     support = _support_stats(cells, asset["cells"], 128)
                     entry = {"status": "success", "support": support,
                              "latent_sites": len(mean),

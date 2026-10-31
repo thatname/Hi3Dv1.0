@@ -113,7 +113,16 @@ class TrainableHi3DDecoder(nn.Module):
         )
 
     def forward(self, latent, fine_cells: torch.Tensor, resolution: int,
-                *, predicted_support: bool = False, max_sites: int = 2_000_000):
+                *, predicted_support: bool = False, max_sites: int = 2_000_000,
+                support_threshold: float = 0.0):
+        """Decode a latent into per-corner field and deformation.
+
+        support_threshold only affects the self-predicted support: a child cell
+        is kept when its occupancy logit exceeds this value. Hi3D's inference
+        path hard-codes the equivalent of 0.0, and 0.0 reproduces that behaviour
+        exactly. The threshold is an inference operating point, never used in
+        training, and must be reported alongside any metric it produced.
+        """
         if resolution % 8 or len(fine_cells) == 0:
             raise ValueError("G1 requires nonempty cells at a multiple-of-8 resolution")
         levels = [torch.unique(fine_cells // (2 ** power), dim=0)
@@ -141,7 +150,7 @@ class TrainableHi3DDecoder(nn.Module):
                 unpool = module.upsample
                 logits = unpool.cls_head(point).feat.reshape(-1)
                 if predicted_support:
-                    flat = torch.nonzero(logits > 0, as_tuple=True)[0]
+                    flat = torch.nonzero(logits > support_threshold, as_tuple=True)[0]
                     if len(flat) > max_sites:
                         raise RuntimeError("Predicted child support exceeds max_sites")
                     if len(flat) == 0:
@@ -183,12 +192,13 @@ class G1VAE(nn.Module):
         self.decoder = TrainableHi3DDecoder(backbone)
 
     def forward(self, unique_coords, features, fine_cells, resolution: int,
-                *, predicted_support: bool = False, max_sites: int = 2_000_000):
+                *, predicted_support: bool = False, max_sites: int = 2_000_000,
+                support_threshold: float = 0.0):
         x = Sparse(torch.cat((torch.zeros((len(unique_coords), 1), device=unique_coords.device,
                                           dtype=torch.int32), unique_coords.int()), 1),
                    features, resolution, sparsity_mode="full-band")
         latent, mean, logvar = self.encoder(x, fine_cells)
         cells, signed, delta, occupancy = self.decoder(
             latent, fine_cells, resolution, predicted_support=predicted_support,
-            max_sites=max_sites)
+            max_sites=max_sites, support_threshold=support_threshold)
         return cells, signed, delta, occupancy, mean, logvar
