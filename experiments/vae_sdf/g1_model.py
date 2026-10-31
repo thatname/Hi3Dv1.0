@@ -113,7 +113,16 @@ class TrainableHi3DDecoder(nn.Module):
         )
 
     def forward(self, latent, fine_cells: torch.Tensor, resolution: int,
-                *, predicted_support: bool = False, max_sites: int = 2_000_000):
+                *, predicted_support: bool = False, max_sites: int = 2_000_000,
+                support_dilation: int = 0):
+        """Decode a latent into per-corner field and deformation.
+
+        support_dilation only touches the self-predicted support and only the
+        finest level: 1 keeps every sibling of a selected cell (its parent's whole
+        2x2x2 block), 2 also includes children of face-adjacent parents. Either
+        way the added cells are produced by the decoder, never invented, and 0
+        preserves the trained behaviour exactly.
+        """
         if resolution % 8 or len(fine_cells) == 0:
             raise ValueError("G1 requires nonempty cells at a multiple-of-8 resolution")
         levels = [torch.unique(fine_cells // (2 ** power), dim=0)
