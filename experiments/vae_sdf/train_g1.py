@@ -24,10 +24,11 @@ from torch.utils.checkpoint import checkpoint
 
 from sparc3d.models.autoencoders.config import load_sparconv_vae
 from vae3d.geometry import validity_loss
-from .g0b_field_adapter import HI3D_FROM_VAE, VAE_FROM_HI3D, pack_target
+from .g0b_field_adapter import HI3D_FROM_VAE, VAE_FROM_HI3D, pack_target, rebuild_cell_indices
 from .g1_model import G1VAE, _rows
-from .g1_split import check_split
+from .g1_split import check_split, check_split_subset
 from .g1_targets import ROUTE, target_rows as select_target_rows
+from .streaming_targets import LazyTargets
 
 
 def sha256(path: Path) -> str:
@@ -93,8 +94,12 @@ def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, devic
         coords = np.asarray(target["coords"], np.int32)
         features = np.asarray(target["features"], np.float32)
         cells = np.asarray(target["cells"], np.int32)
-        indices = np.asarray(target["cell_indices"], np.int64)
         resolution = int(target["resolution"])
+        # pooled targets drop cell_indices to save a third of the cache; the
+        # corner index is an exact lookup, so it is rebuilt on load
+        indices = (np.asarray(target["cell_indices"], np.int64)
+                   if "cell_indices" in target.files
+                   else rebuild_cell_indices(coords, cells, resolution).astype(np.int64))
         phase = float(target["sampling_offset"])
         if row.get("route_id") and (str(target["stage"]) != "A4"
                 or str(target["route_id"]) != ROUTE
@@ -172,7 +177,7 @@ def cell_validity(delta: torch.Tensor, chunk: int = 65536) -> torch.Tensor:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest", type=Path, required=True)
-    targets = p.add_mutually_exclusive_group(required=True)
+    targets = p.add_mutually_exclusive_group(required=False)
     targets.add_argument("--a4-summary", type=Path, help="Historical single-route A4 batch")
     targets.add_argument("--paired-summary", type=Path, help="Fixed four-route v5 paired summary")
     p.add_argument("--weights", type=Path, required=True)
@@ -180,7 +185,9 @@ def main() -> int:
     p.add_argument("--resume", type=Path, help="Exact model/optimizer continuation from a G1 checkpoint")
     p.add_argument("--save-every", type=int, default=0,
                    help="Keep a separately named checkpoint every N updates; 0 saves only at the end")
-    p.add_argument("--indices", type=int, nargs="+", default=[48, 5])
+    p.add_argument("--indices", type=int, nargs="+",
+                   help="Ordered asset indices; with --targets-root the default is every "
+                        "target finished at launch")
     p.add_argument("--split", type=Path, help="Fixed asset-level split; indices must match its train role")
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--resolution", type=int, choices=(128, 256), default=128,
@@ -203,8 +210,15 @@ def main() -> int:
     p.add_argument("--max-skipped", type=int, default=20,
                    help="Tolerated nonfinite batches before the run aborts; each skip is "
                         "logged with a per-level diagnosis and never updates the model")
+    p.add_argument("--targets-root", type=Path,
+                   help="Stream finished A4 targets from this pool instead of a fixed summary")
+    p.add_argument("--stream-resident", type=int, default=1,
+                   help="How many streamed targets stay resident between steps")
     args = p.parse_args()
-    if (args.steps < 1 or args.save_every < 0 or args.lr <= 0 or not args.indices
+    if args.indices is None:
+        args.indices = []
+    if (args.steps < 1 or args.save_every < 0 or args.lr <= 0
+            or (not args.indices and not args.targets_root)
             or len(set(args.indices)) != len(args.indices)
             or args.surface_weight < 0 or args.surface_sigma <= 0
             or args.truncation < 0 or args.validity_weight < 0):
@@ -224,13 +238,34 @@ def main() -> int:
     four_route = args.paired_summary is not None
     if four_route and args.output.resolve().is_relative_to(summary_path.resolve().parent.parent):
         p.error("Four-route G1 output must be outside the G0 preparation directory")
-    rows = select_target_rows(summary_path, manifest, four_route=four_route)
+    if args.targets_root:
+        # the pool is still being generated: train on what is finished right now
+        four_route = True
+        summary_path = None
+        wanted = args.indices
+        if not wanted and args.split:
+            # a streaming run may only touch the role's own assets: the pool keeps
+            # producing val/test targets alongside training ones
+            wanted = json.loads(args.split.read_text(encoding="utf-8"))["train_indices"]
+        stream = LazyTargets(args.targets_root, manifest, manifest_hash, args.resolution,
+                             device, args.asset_device, wanted,
+                             max_resident=args.stream_resident, seed=args.seed)
+        rows = stream.rows
+        indices = stream.indices
+        assets = stream
+        pick = lambda position: stream[stream.index_at(position)]
+    else:
+        rows = select_target_rows(summary_path, manifest, four_route=four_route)
+        indices = args.indices
+        assets = [load_asset(i, manifest, rows, manifest_hash, device, args.resolution,
+                             args.asset_device)
+                  for i in indices]
+        pick = lambda position: assets[position]
     training_schema = "g1_four_route_v1" if four_route else "g1_a4_overfit_v2"
     summary_hash_key = "paired_summary_sha256" if four_route else "a4_summary_sha256"
-    split_hash = check_split(args.split, manifest, manifest_hash, "train", args.indices) if args.split else None
-    assets = [load_asset(i, manifest, rows, manifest_hash, device, args.resolution,
-                         args.asset_device)
-              for i in args.indices]
+    split_hash = ((check_split_subset if args.targets_root else check_split)
+                  (args.split, manifest, manifest_hash, "train", indices)
+                  if args.split else None)
     pretrained = load_sparconv_vae(args.weights, device=device)
     model = G1VAE(pretrained.decoder, args.encoder_scale).to(device).train()
     # The released sign/distance head is retained only for exact backbone loading.
@@ -245,8 +280,9 @@ def main() -> int:
         state = torch.load(args.resume, map_location=device, weights_only=False)
         old = state["config"]
         expected = {
-            "schema": training_schema, "indices": args.indices,
-            "manifest_sha256": manifest_hash, summary_hash_key: sha256(summary_path),
+            "schema": training_schema, "indices": indices,
+            "manifest_sha256": manifest_hash,
+            summary_hash_key: sha256(summary_path) if summary_path else None,
             "pretrained_weights_sha256": sha256(args.weights), "lr": args.lr,
             "surface_weight": args.surface_weight, "surface_sigma": args.surface_sigma,
             "truncation": args.truncation, "validity_weight": args.validity_weight,
@@ -278,7 +314,7 @@ def main() -> int:
         "schema": training_schema, "status": "running", "beta": 0,
         "stage": args.stage, "encoder_scale": args.encoder_scale,
         "target_route": ROUTE if four_route else "legacy_a4",
-        "teacher_forced_support": True, "indices": args.indices,
+        "teacher_forced_support": True, "indices": indices,
         "steps": start_step + args.steps, "additional_steps": args.steps,
         "start_step": start_step, "resume_from": str(args.resume) if args.resume else None,
         "rng_restored": rng_restored, "save_every": args.save_every,
@@ -287,8 +323,9 @@ def main() -> int:
         "lr": args.lr, "seed": args.seed, "manifest_sha256": manifest_hash,
         "surface_weight": args.surface_weight, "surface_sigma": args.surface_sigma,
         "truncation": args.truncation, "validity_weight": args.validity_weight,
-        summary_hash_key: sha256(summary_path),
-        "target_summary": str(summary_path),
+        summary_hash_key: sha256(summary_path) if summary_path else None,
+        "target_summary": str(summary_path) if summary_path else None,
+        "target_stream": assets.describe() if args.targets_root else None,
         "pretrained_weights": str(args.weights), "pretrained_weights_sha256": sha256(args.weights),
         "pretrained_loading": "strict: all released Hi3D decoder parameters; old output head frozen/unused; new head random",
         "encoder_initialization": "random; adapted vae3d Encoder structure, factor 8/latent 32",
@@ -298,7 +335,9 @@ def main() -> int:
         "resolution": args.resolution,
         "asset_device": args.asset_device,
         "torch_version": torch.__version__, "gpu": torch.cuda.get_device_name(0),
-        "assets": [{k: v for k, v in a.items() if not isinstance(v, torch.Tensor)} for a in assets],
+        "assets": ([] if args.targets_root else
+                   [{k: v for k, v in a.items() if not isinstance(a[k], torch.Tensor)}
+                    for a in assets]),
         "trace": prior_trace,
     }
     write_json(args.output / "resolved_config.json", report)
@@ -306,7 +345,7 @@ def main() -> int:
     skipped = 0
     try:
         for step in range(start_step, start_step + args.steps):
-            asset = upload(assets[step % len(assets)], device)
+            asset = upload(pick(step % len(assets)), device)
             torch.cuda.reset_peak_memory_stats(0)
             allocated_before = int(torch.cuda.memory_allocated(0))
             optimizer.zero_grad(set_to_none=True)

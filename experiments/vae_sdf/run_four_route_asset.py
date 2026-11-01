@@ -15,7 +15,7 @@ from .preflight import VAE3D_COMMIT, sha256
 
 SCHEMA = "g0_four_route_r128_v1"
 SUPPORTED_RESOLUTIONS = (128, 256)
-GPU_WHITELIST = (1, 2, 3, 7)
+GPU_WHITELIST = (0, 1, 2, 3, 4, 5, 6, 7)
 
 
 def physical_gpu() -> int:

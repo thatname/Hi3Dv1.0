@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>G3 pipeline</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 24px; max-width: 960px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 24px 0 8px; text-transform: uppercase; letter-spacing: .05em; opacity: .6; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 4px 12px 4px 0; font-variant-numeric: tabular-nums; }
+  th { font-weight: 500; opacity: .6; }
+  .bar { height: 6px; background: rgba(128,128,128,.25); border-radius: 3px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: #2a7; }
+  .muted { opacity: .55; }
+  #error { color: #c33; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>G3 全量池 + 放大编码器（R256）</h1>
+<div class="muted" id="meta">loading…</div>
+<div id="error"></div>
+<div id="body"></div>
+<script>
+const fmt = n => n === null || n === undefined ? "—" : n.toLocaleString("en-US");
+const gb = n => (n / 1073741824).toFixed(1) + " GB";
+const pct = (a, b) => b ? (100 * a / b).toFixed(2) + "%" : "—";
+
+function bar(done, total) {
+  const p = total ? Math.min(100, 100 * done / total) : 0;
+  return `<div class="bar"><i style="width:${p}%"></i></div>`;
+}
+
+function stage(title, rows, done, total) {
+  return `<h2>${title}</h2>${total ? bar(done, total) : ""}<table>${rows}</table>`;
+}
+
+function render(s) {
+  const m = s.manifest, a1 = s.a1a2, a4 = s.a4;
+  const a1c = a1.counts || {};
+  const a1done = (a1c.success || 0) + (a1c.failed || 0);
+  const parts = [];
+  parts.push(stage("清单", `
+    <tr><th>可用资产</th><td>${fmt(m.assets)}</td></tr>
+    <tr><th>loaded / failed / degenerate</th><td>${fmt(m.loaded)} / ${fmt(m.failed)} / ${fmt(m.degenerate)}</td></tr>
+    <tr><th>面数中位</th><td>${fmt(m.faces_median)}</td></tr>
+    <tr><th>manifest sha</th><td class="muted">${(m.manifest_sha256 || "").slice(0, 16)}…</td></tr>`));
+  if (s.policy) {
+    parts.push(stage("容量策略", `
+      <tr><th>阈值</th><td>${fmt(s.policy.threshold_cells)} cell（预估）</td></tr>
+      <tr><th>排除</th><td>${fmt(s.policy.excluded_total)} 件（${pct(s.policy.excluded_total, m.assets)}）</td></tr>
+      <tr><th>模型 / P90 误差</th><td>${s.policy.model} · ${(100 * s.policy.p90_abs_rel_error).toFixed(0)}%</td></tr>
+      <tr><th>split（策略后）</th><td>train ${fmt(s.split.train)} / val ${fmt(s.split.val)} / test ${fmt(s.split.test)}</td></tr>`));
+  }
+  parts.push(stage("A1/A2 目标（CPU）", `
+    <tr><th>成功 / 失败 / 待跑</th><td>${fmt(a1c.success)} / ${fmt(a1c.failed)} / ${fmt(a1c.pending)}</td></tr>
+    <tr><th>单件中位耗时</th><td>${a1.seconds_median ? a1.seconds_median.toFixed(1) + " s" : "—"}</td></tr>
+    <tr><th>运行中进程</th><td>${fmt(a1.running)}</td></tr>`, a1done, m.assets));
+  parts.push(stage("A4 目标（GPU）", `
+    <tr><th>已完成</th><td>${fmt(a4.present)} / ${fmt(a4.target)}（${pct(a4.present, a4.target)}）</td></tr>
+    <tr><th>record 完成数</th><td>${fmt(a4.seconds_count)}${a4.seconds_median ? " · 中位 " + a4.seconds_median.toFixed(1) + " s/件" : ""}</td></tr>
+    <tr><th>各卡</th><td>${Object.entries(a4.records_by_gpu).map(([k, v]) => k + ": " + fmt(v)).join(" · ") || "—"}</td></tr>
+    <tr><th>运行中进程</th><td>${fmt(a4.running)}</td></tr>`, a4.present, a4.target));
+  parts.push(stage("磁盘", `
+    <tr><th>targets 占用</th><td>${gb(s.disk.targets_bytes)}</td></tr>`));
+  if (s.rates) {
+    const r = s.rates;
+    const line = (label, v) => `<tr><th>${label}</th><td>${fmt(v.done)} / ${fmt(v.remaining + v.done)}
+      · ${v.per_minute} 件/分（近 ${r.window_minutes} 分钟）
+      · 剩余 <b>${v.eta_hours === null ? "—" : v.eta_hours + " h"}</b>
+      ${v.finish_local ? "（" + v.finish_local + "）" : ""}</td></tr>`;
+    parts.push(stage("预计剩余时间", `
+      ${line("A1/A2", r.a1a2)}
+      ${line("A4", r.a4)}
+      <tr><th>整体</th><td><b>${r.overall_eta_hours === null ? "—" : r.overall_eta_hours + " 小时"}</b>
+        ${r.overall_finish_local ? "，预计 " + r.overall_finish_local + " 完成" : ""}</td></tr>`));
+  }
+  document.getElementById("body").innerHTML = parts.join("");
+  document.getElementById("meta").textContent =
+    `${s.experiment} · R${s.resolution} · 更新于 ${new Date().toLocaleTimeString()}`;
+}
+
+async function tick() {
+  try {
+    const res = await fetch("/api/state", { cache: "no-store" });
+    if (!res.ok) throw new Error(await res.text());
+    render(await res.json());
+    document.getElementById("error").textContent = "";
+  } catch (e) {
+    document.getElementById("error").textContent = "state failed: " + e.message;
+  }
+}
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

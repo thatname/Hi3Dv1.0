@@ -22,11 +22,47 @@ HI3D_FROM_VAE = np.array(
 VAE_FROM_HI3D = np.argsort(HI3D_FROM_VAE)
 
 
+def rebuild_cell_indices(coords, cells, resolution: int) -> np.ndarray:
+    """Recover the unique-point index of all eight cell corners.
+
+    Cell corners are exactly grid points, so the mapping is a lookup and not an
+    approximation: the packed cache can drop its 8-wide index array (a third of
+    the file) and regenerate it whenever a target is loaded.
+    """
+
+    coords = np.asarray(coords, np.int64)
+    cells = np.asarray(cells, np.int64)
+    if (coords.ndim != 2 or coords.shape[1] != 3 or cells.ndim != 2
+            or cells.shape[1] != 3 or len(coords) == 0 or len(cells) == 0):
+        raise ValueError("Invalid coordinates or cells for index rebuild")
+    if ((coords < 0).any() or (coords >= resolution).any()
+            or (cells < 0).any() or (cells >= resolution - 1).any()):
+        raise ValueError("Coordinates or cells outside the grid")
+
+    def encode(points: np.ndarray) -> np.ndarray:
+        return (points[:, 0] * resolution + points[:, 1]) * resolution + points[:, 2]
+
+    keys = encode(coords)
+    if len(np.unique(keys)) != len(keys):
+        raise ValueError("Duplicate coordinates cannot be rebuilt into an index")
+    order = np.argsort(keys, kind="stable")
+    sorted_keys = keys[order]
+    out = np.empty((len(cells), len(VAE_CORNERS)), np.int32)
+    for corner, offset in enumerate(VAE_CORNERS):
+        position = np.searchsorted(sorted_keys, encode(cells + offset))
+        if position.max() >= len(sorted_keys):
+            raise ValueError("A cell corner is missing from the support points")
+        out[:, corner] = order[position]
+    return out
+
+
 def pack_target(coords, features, cells, cell_indices, resolution: int):
     """Return Hi3D cell coordinates/features and its original unique-point indices."""
     coords = np.asarray(coords, np.int32)
     features = np.asarray(features, np.float32)
     cells = np.asarray(cells, np.int32)
+    if cell_indices is None:
+        cell_indices = rebuild_cell_indices(coords, cells, resolution)
     cell_indices = np.asarray(cell_indices, np.int64)
     if (resolution < 2 or coords.ndim != 2 or coords.shape[1] != 3
             or cells.ndim != 2 or cells.shape[1] != 3

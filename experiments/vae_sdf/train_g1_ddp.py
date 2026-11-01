@@ -28,12 +28,13 @@ from torch.nn import functional as F
 from sparc3d.models.autoencoders.config import load_sparconv_vae
 
 from .g1_model import G1VAE, _rows
-from .g1_split import check_split
+from .g1_split import check_split, check_split_subset
 from .g1_targets import ROUTE, target_rows as select_target_rows
+from .streaming_targets import LazyTargets
 from .train_g1 import (cell_validity, grad_status, load_asset, sha256, upload,
                        write_json)
 
-GPU_WHITELIST = (1, 2, 3, 7)
+GPU_WHITELIST = (0, 1, 2, 3, 4, 5, 6, 7)
 SCHEMA = "g1_four_route_v1"
 CODE_FILES = ("train_g1_ddp.py", "train_g1.py", "g1_model.py", "g0b_field_adapter.py")
 
@@ -98,13 +99,27 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
     manifest_bytes = args.manifest.read_bytes()
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     manifest = json.loads(manifest_bytes)
-    rows = select_target_rows(args.paired_summary, manifest, four_route=True)
-    summary_hash = sha256(args.paired_summary)
-    split_hash = (check_split(args.split, manifest, manifest_hash, "train", args.indices)
-                  if args.split else None)
-    assets = {i: load_asset(i, manifest, rows, manifest_hash, device, args.resolution,
-                            args.asset_device)
-              for i in args.indices}
+    rows = None if args.targets_root else select_target_rows(args.paired_summary, manifest,
+                                                           four_route=True)
+    summary_hash = sha256(args.paired_summary) if args.paired_summary else None
+    indices = args.indices
+    split_hash = (None if not args.split else
+                  (check_split_subset if args.targets_root else check_split)
+                  (args.split, manifest, manifest_hash, "train", indices))
+    if args.targets_root:
+        # the pool keeps growing: freeze the finished set at launch so both arms
+        # replay the same assets in the same order
+        wanted = indices
+        if not wanted and args.split:
+            wanted = json.loads(args.split.read_text(encoding="utf-8"))["train_indices"]
+        assets = LazyTargets(args.targets_root, manifest, manifest_hash, args.resolution,
+                             device, args.asset_device, wanted,
+                             max_resident=args.stream_resident, seed=args.seed)
+        indices = assets.indices
+    else:
+        assets = {i: load_asset(i, manifest, rows, manifest_hash, device, args.resolution,
+                                args.asset_device)
+                  for i in indices}
     pretrained = load_sparconv_vae(args.weights, device=device)
     model = G1VAE(pretrained.decoder, args.encoder_scale).to(device).train()
     for param in model.decoder.backbone.conv_out.parameters():
@@ -122,7 +137,7 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
         state = torch.load(args.resume, map_location=device, weights_only=False)
         old = state["config"]
         expected = {
-            "schema": SCHEMA, "stage": args.stage, "encoder_scale": args.encoder_scale, "indices": args.indices,
+            "schema": SCHEMA, "stage": args.stage, "encoder_scale": args.encoder_scale, "indices": indices,
             "manifest_sha256": manifest_hash, "paired_summary_sha256": summary_hash,
             "pretrained_weights_sha256": sha256(args.weights), "lr": args.lr,
             "surface_weight": args.surface_weight, "surface_sigma": args.surface_sigma,
@@ -160,7 +175,7 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
     report = {
         "schema": SCHEMA, "status": "running", "beta": 0,
         "stage": args.stage, "target_route": ROUTE, "teacher_forced_support": True,
-        "indices": args.indices, "steps": start_step + args.steps,
+        "indices": indices, "steps": start_step + args.steps,
         "additional_steps": args.steps, "start_step": start_step,
         "resume_from": str(args.resume) if args.resume else None,
         "rng_restored_ranks": sorted(restored_ranks), "save_every": args.save_every,
@@ -172,7 +187,8 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
         "manifest_sha256": manifest_hash, "surface_weight": args.surface_weight,
         "surface_sigma": args.surface_sigma, "truncation": args.truncation,
         "validity_weight": args.validity_weight,
-        "paired_summary_sha256": summary_hash, "target_summary": str(args.paired_summary),
+        "paired_summary_sha256": summary_hash,
+        "target_summary": str(args.paired_summary) if args.paired_summary else None,
         "pretrained_weights": str(args.weights),
         "pretrained_weights_sha256": sha256(args.weights),
         "pretrained_loading": "strict: all released Hi3D decoder parameters; old output head "
@@ -181,8 +197,10 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
         "code_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "code_sha256": {name: sha256(Path(__file__).parent / name) for name in CODE_FILES},
         "torch_version": torch.__version__, "gpu": torch.cuda.get_device_name(0),
-        "assets": [{k: v for k, v in assets[i].items() if not isinstance(v, torch.Tensor)}
-                   for i in args.indices],
+        "assets": ([] if args.targets_root else
+                   [{k: v for k, v in assets[i].items() if not isinstance(v, torch.Tensor)}
+                    for i in indices]),
+        "target_stream": assets.describe() if args.targets_root else None,
         "trace": prior_trace,
     }
     if rank == 0:
@@ -191,7 +209,7 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
     started = time.perf_counter()
     try:
         for step in range(start_step, start_step + args.steps):
-            index = args.indices[(step * world + rank) % len(args.indices)]
+            index = indices[(step * world + rank) % len(indices)]
             asset = upload(assets[index], device)
             optimizer.zero_grad(set_to_none=True)
             cells, signed, delta, occupancy, mean, logvar = model(
@@ -274,11 +292,15 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest", type=Path, required=True)
-    p.add_argument("--paired-summary", type=Path, required=True)
+    p.add_argument("--paired-summary", type=Path)
     p.add_argument("--weights", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--split", type=Path)
-    p.add_argument("--indices", type=int, nargs="+", required=True)
+    p.add_argument("--indices", type=int, nargs="+")
+    p.add_argument("--targets-root", type=Path,
+                   help="Stream finished A4 targets instead of a fixed paired summary")
+    p.add_argument("--stream-resident", type=int, default=1,
+                   help="How many streamed targets stay resident per rank")
     p.add_argument("--gpus", type=int, nargs="+", default=[7])
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--save-every", type=int, default=0)
@@ -298,14 +320,16 @@ def main() -> int:
     p.add_argument("--resume", type=Path)
     p.add_argument("--seed", type=int, default=20261030)
     args = p.parse_args()
-    if (not args.indices or args.steps < 1 or args.save_every < 0 or args.lr <= 0
-            or len(set(args.indices)) != len(args.indices)
+    if ((not args.indices and not args.targets_root) or args.steps < 1
+            or args.save_every < 0 or args.lr <= 0
+            or len(set(args.indices or [])) != len(args.indices or [])
             or args.surface_weight < 0 or args.surface_sigma <= 0
             or args.truncation < 0 or args.validity_weight < 0):
         p.error("Invalid indices, steps, learning rate, or loss weights")
     if any(gpu not in GPU_WHITELIST for gpu in args.gpus) or len(set(args.gpus)) != len(args.gpus):
         p.error(f"--gpus must be distinct values from {GPU_WHITELIST}")
-    if len(args.indices) < len(args.gpus):
+    args.indices = args.indices or []
+    if args.indices and len(args.indices) < len(args.gpus):
         p.error("Every rank needs its own asset: --indices must be at least as long as --gpus")
     if args.output.exists():
         p.error("Output exists; choose a new run directory to retain provenance")
@@ -314,9 +338,10 @@ def main() -> int:
     manifest_bytes = args.manifest.read_bytes()
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     manifest = json.loads(manifest_bytes)
-    if args.output.resolve().is_relative_to(args.paired_summary.resolve().parent.parent):
+    if (args.paired_summary is not None and args.output.resolve()
+            .is_relative_to(args.paired_summary.resolve().parent.parent)):
         p.error("Four-route output must be outside the G0 preparation directory")
-    if args.split:
+    if args.split and not args.targets_root:
         check_split(args.split, manifest, manifest_hash, "train", args.indices)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
