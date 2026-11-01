@@ -55,8 +55,27 @@ def save_checkpoint(path: Path, model, optimizer, step: int, report: dict) -> No
     temporary.replace(path)
 
 
+TENSOR_KEYS = ("coords", "features", "cells", "field", "delta", "weight")
+
+
+def upload(asset: dict, device: str) -> dict:
+    """Move one asset's tensors to the training device on demand.
+
+    R256 targets cost about 23 kB of activation memory per finest cell, so a
+    whole asset set can no longer sit on the card: the tensors stay on the host
+    and only the asset being trained is uploaded for its step.
+    """
+    if asset.get("tensor_device") == device:
+        return asset
+    moved = dict(asset)
+    moved.update({key: asset[key].to(device) for key in TENSOR_KEYS})
+    moved["tensor_device"] = device
+    return moved
+
+
 def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, device: str,
-               expect_resolution: int = 128):
+               expect_resolution: int = 128, tensor_device: str | None = None):
+    storage = tensor_device or device
     asset, row = manifest["assets"][index], rows[index]
     if row["index"] != index or row["id"] != asset["id"] or row["status"] != "success":
         raise ValueError("A4 summary and fixed manifest disagree")
@@ -95,12 +114,13 @@ def load_asset(index: int, manifest: dict, rows: list, manifest_hash: str, devic
         "a0_status": config.get("a0_status", row.get("a0_status")),
         "a0_concerns": config.get("a0_concerns", row.get("a0_concerns")),
         "inverted_crossing_cells": row["audit"]["grid_quality"]["inverted_crossing_cells"],
-        "coords": torch.as_tensor(coords, device=device),
-        "features": torch.as_tensor(features, device=device),
-        "cells": torch.as_tensor(cells, device=device),
-        "field": torch.as_tensor(features[hi_indices, 0], device=device),
-        "delta": torch.as_tensor(features[hi_indices, 1:], device=device),
-        "weight": torch.as_tensor(weight, device=device),
+        "tensor_device": storage,
+        "coords": torch.as_tensor(coords, device=storage),
+        "features": torch.as_tensor(features, device=storage),
+        "cells": torch.as_tensor(cells, device=storage),
+        "field": torch.as_tensor(features[hi_indices, 0], device=storage),
+        "delta": torch.as_tensor(features[hi_indices, 1:], device=storage),
+        "weight": torch.as_tensor(weight, device=storage),
     }
 
 
@@ -111,6 +131,31 @@ def grad_status(parameters):
     finite = all(bool(torch.isfinite(g).all()) for g in gradients)
     squared = sum(float(g.detach().float().square().sum()) for g in gradients)
     return {"present": True, "finite": finite, "norm": math.sqrt(squared)}
+
+
+def loss_diagnosis(field_loss, delta_loss, support_loss, validity, signed, delta,
+                   target_field, occupancy, mean, logvar) -> dict:
+    """Which term went nonfinite, and what the predicted tensors look like."""
+
+    def finite(value) -> bool:
+        return bool(torch.isfinite(value).all()) if torch.is_tensor(value) else True
+
+    def bad_count(value) -> int:
+        return int((~torch.isfinite(value)).sum()) if torch.is_tensor(value) else 0
+
+    return {
+        "field": finite(field_loss), "delta": finite(delta_loss),
+        "support": finite(support_loss), "validity": finite(validity),
+        "signed_nonfinite": bad_count(signed),
+        "delta_nonfinite": bad_count(delta),
+        "target_nonfinite": bad_count(target_field),
+        # Per decoder level: a NaN first appearing deep inside the pyramid means an
+        # empty or degenerate convolution group rather than a poisoned latent.
+        "levels_nonfinite": [bad_count(logits) for logits in occupancy],
+        "levels_sites": [int(logits.numel()) for logits in occupancy],
+        "latent_nonfinite": bad_count(mean) + bad_count(logvar),
+        "cells": int(signed.shape[0]),
+    }
 
 
 def cell_validity(delta: torch.Tensor, chunk: int = 65536) -> torch.Tensor:
@@ -140,6 +185,9 @@ def main() -> int:
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--resolution", type=int, choices=(128, 256), default=128,
                    help="Fine-grid resolution of the target caches")
+    p.add_argument("--asset-device", choices=("cuda", "cpu"), default="cuda",
+                   help="Where the cached target tensors live between steps; R256 sets "
+                        "cannot fit a whole asset set on one card")
     p.add_argument("--stage", choices=("G1", "G2"), default="G1",
                    help="Experiment stage recorded in the resolved config and checkpoints")
     p.add_argument("--lr", type=float, default=1e-4)
@@ -148,6 +196,9 @@ def main() -> int:
     p.add_argument("--truncation", type=float, default=4.0)
     p.add_argument("--validity-weight", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=20261030)
+    p.add_argument("--max-skipped", type=int, default=20,
+                   help="Tolerated nonfinite batches before the run aborts; each skip is "
+                        "logged with a per-level diagnosis and never updates the model")
     args = p.parse_args()
     if (args.steps < 1 or args.save_every < 0 or args.lr <= 0 or not args.indices
             or len(set(args.indices)) != len(args.indices)
@@ -173,7 +224,8 @@ def main() -> int:
     training_schema = "g1_four_route_v1" if four_route else "g1_a4_overfit_v2"
     summary_hash_key = "paired_summary_sha256" if four_route else "a4_summary_sha256"
     split_hash = check_split(args.split, manifest, manifest_hash, "train", args.indices) if args.split else None
-    assets = [load_asset(i, manifest, rows, manifest_hash, device, args.resolution)
+    assets = [load_asset(i, manifest, rows, manifest_hash, device, args.resolution,
+                         args.asset_device)
               for i in args.indices]
     pretrained = load_sparconv_vae(args.weights, device=device)
     model = G1VAE(pretrained.decoder).to(device).train()
@@ -208,7 +260,8 @@ def main() -> int:
         optimizer.load_state_dict(state["optimizer"])
         start_step = int(state["steps"])
         prior_trace = list(old.get("trace", []))
-        if len(prior_trace) != start_step:
+        skipped_before = len(old.get("skipped_nonfinite_detail", []))
+        if len(prior_trace) + skipped_before != start_step:
             raise ValueError("G1 checkpoint step and trace length differ")
         if "rng" in state:
             torch.set_rng_state(state["rng"]["torch"].cpu())
@@ -239,15 +292,19 @@ def main() -> int:
         "code_sha256": {name: sha256(Path(__file__).parent / name) for name in
                         ("train_g1.py", "g1_model.py", "g0b_field_adapter.py")},
         "resolution": args.resolution,
+        "asset_device": args.asset_device,
         "torch_version": torch.__version__, "gpu": torch.cuda.get_device_name(0),
         "assets": [{k: v for k, v in a.items() if not isinstance(v, torch.Tensor)} for a in assets],
         "trace": prior_trace,
     }
     write_json(args.output / "resolved_config.json", report)
     started = time.perf_counter()
+    skipped = 0
     try:
         for step in range(start_step, start_step + args.steps):
-            asset = assets[step % len(assets)]
+            asset = upload(assets[step % len(assets)], device)
+            torch.cuda.reset_peak_memory_stats(0)
+            allocated_before = int(torch.cuda.memory_allocated(0))
             optimizer.zero_grad(set_to_none=True)
             cells, signed, delta, occupancy, mean, logvar = model(
                 asset["coords"], asset["features"], asset["cells"], args.resolution)
@@ -270,7 +327,22 @@ def main() -> int:
             validity = cell_validity(delta) if args.validity_weight else delta.sum() * 0
             loss = field_loss + delta_loss + support_loss + args.validity_weight * validity
             if not bool(torch.isfinite(loss)):
-                raise FloatingPointError("Nonfinite G1 loss")
+                detail = loss_diagnosis(field_loss, delta_loss, support_loss, validity,
+                                        signed, delta, asset["field"][target_rows],
+                                        occupancy, mean, logvar)
+                # A single poisoned asset must not throw away a multi-hour run: skip
+                # the update, keep the counts and the diagnosis on the trace.
+                skipped += 1
+                report["skipped_nonfinite_steps"] = skipped
+                report["skipped_nonfinite_detail"] = report.get(
+                    "skipped_nonfinite_detail", []) + [{"step": step + 1, **detail}]
+                optimizer.zero_grad(set_to_none=True)
+                del cells, signed, delta, occupancy, mean, logvar, field, deform
+                write_json(args.output / "resolved_config.json", report)
+                print(json.dumps({"step": step + 1, "skipped": detail}), flush=True)
+                if skipped > args.max_skipped:
+                    raise FloatingPointError(f"Nonfinite G1 loss: {detail}")
+                continue
             loss.backward()
             groups = {
                 "encoder": grad_status(model.encoder.parameters()),
@@ -283,12 +355,20 @@ def main() -> int:
             if not all(x["present"] and x["finite"] and x["norm"] > 0 for x in groups.values()):
                 raise FloatingPointError(f"Missing, zero, or nonfinite G1 gradients: {groups}")
             optimizer.step()
+            poisoned = [name for name, param in model.named_parameters()
+                        if not bool(torch.isfinite(param).all())]
+            if poisoned:
+                raise FloatingPointError(
+                    f"Optimizer step {step + 1} left nonfinite parameters: {poisoned[:20]}")
             row = {"step": step + 1, "index": asset["index"],
                    "loss": float(loss.detach()), "field": float(field_loss.detach()),
                    "delta": float(delta_loss.detach()), "support": float(support_loss.detach()),
                    "validity": float(validity.detach()),
                    "kl_diagnostic": float(0.5 * (mean.square() + logvar.exp() - 1 - logvar).mean().detach()),
                    "latent_sites": len(mean), "fine_cells": len(cells), "gradients": groups,
+                   "cuda_allocated_before": allocated_before,
+                   "cuda_step_peak_bytes": int(torch.cuda.max_memory_allocated(0)),
+                   "cuda_allocated_after": int(torch.cuda.memory_allocated(0)),
                    "elapsed_seconds": time.perf_counter() - started}
             report["trace"].append(row)
             write_json(args.output / "trace.json", report["trace"])
@@ -298,7 +378,9 @@ def main() -> int:
                 save_checkpoint(args.output / f"checkpoint_step_{step + 1:06d}.pt",
                                 model, optimizer, step + 1, snapshot_report)
         report["status"] = "completed"
-        report["peak_cuda_allocated_bytes"] = torch.cuda.max_memory_allocated(0)
+        report["peak_cuda_allocated_bytes"] = max(
+            [row.get("cuda_step_peak_bytes", 0) for row in report["trace"]]
+            + [torch.cuda.max_memory_allocated(0)])
         report["elapsed_seconds"] = time.perf_counter() - started
         save_checkpoint(args.output / "checkpoint.pt", model, optimizer,
                         start_step + args.steps, report)
