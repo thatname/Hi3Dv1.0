@@ -30,6 +30,8 @@ ENCODER_LADDER = {
     "E1": SimpleNamespace(widths=(64, 128, 256, 512), blocks_per_level=2),
     "E2": SimpleNamespace(widths=(96, 192, 384, 768), blocks_per_level=3),
     "E3": SimpleNamespace(widths=(128, 256, 512, 1024), blocks_per_level=2),
+    # E4 matches the 94 M decoder: same depth, widths scaled by 1.5 (params scale ~k^2).
+    "E4": SimpleNamespace(widths=(192, 384, 768, 1536), blocks_per_level=2),
 }
 
 

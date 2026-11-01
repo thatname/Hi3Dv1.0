@@ -36,7 +36,7 @@ def main() -> int:
     p.add_argument("--asset-device", choices=("cuda", "cpu"), default="cpu")
     p.add_argument("--cycles", type=int, default=1)
     p.add_argument("--encoder-scale", default="E0",
-                   choices=("E0", "E1", "E2", "E3"))
+                   choices=("E0", "E1", "E2", "E3", "E4"))
     p.add_argument("--keep-locals", action="store_true",
                    help="Mimic the trainer loop: keep the previous step's tensors bound "
                         "and skip the per-step cache flush")

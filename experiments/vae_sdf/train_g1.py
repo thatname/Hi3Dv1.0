@@ -189,7 +189,7 @@ def main() -> int:
                    help="Where the cached target tensors live between steps; R256 sets "
                         "cannot fit a whole asset set on one card")
     p.add_argument("--encoder-scale", default="E0",
-                   choices=("E0", "E1", "E2", "E3"),
+                   choices=("E0", "E1", "E2", "E3", "E4"),
                    help="Encoder width ladder; the latent width stays 32 so the"
                         " released decoder weights still load")
     p.add_argument("--stage", choices=("G1", "G2"), default="G1",

@@ -291,7 +291,7 @@ def main() -> int:
     p.add_argument("--asset-device", choices=("cuda", "cpu"), default="cuda",
                    help="Where each rank keeps the cached target tensors between steps")
     p.add_argument("--encoder-scale", default="E0",
-                   choices=("E0", "E1", "E2", "E3"),
+                   choices=("E0", "E1", "E2", "E3", "E4"),
                    help="Encoder width ladder; the latent width stays 32 so the"
                         " released decoder weights still load")
     p.add_argument("--stage", choices=("G1", "G2"), default="G2")
