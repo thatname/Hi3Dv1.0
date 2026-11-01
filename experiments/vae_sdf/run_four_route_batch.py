@@ -19,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from .run_four_route_asset import GPU_WHITELIST, ROUTES
+from .run_four_route_asset import GPU_WHITELIST, ROUTES, SUPPORTED_RESOLUTIONS
 
 
 def save(path: Path, value) -> None:
@@ -40,7 +40,8 @@ def status_lock(root: Path):
 
 
 def protocol_identity(args) -> dict:
-    return {"routes": list(args.routes), "a3_steps": args.a3_steps,
+    return {"routes": list(args.routes), "resolution": args.resolution,
+            "a3_steps": args.a3_steps,
             "a3_samples": args.a3_samples, "a4_steps": args.a4_steps,
             "image_resolution": args.image_resolution,
             "metric_samples": args.metric_samples, "seed": args.seed}
@@ -58,8 +59,11 @@ def mutate_status(root: Path, identity: dict, gpu: int, mutate) -> dict:
             status = json.loads(path.read_text())
             legacy = {k: v for k, v in status["identity"].items()
                       if k not in ("indices", "physical_gpu")}
+            # Roots created before --resolution existed are R128 by construction.
+            legacy.setdefault("resolution", 128)
             if legacy != identity:
                 raise ValueError("Existing batch status has a different protocol")
+            status["identity"] = identity
         else:
             status = {"identity": identity, "runs": {}, "started_at": time.time()}
         status.setdefault("runs", {})
@@ -84,6 +88,7 @@ def main():
     parser.add_argument("--indices", type=int, nargs="+", required=True)
     parser.add_argument("--routes", nargs="+", choices=tuple(ROUTES), default=tuple(ROUTES))
     parser.add_argument("--physical-gpu", type=int, default=7, choices=GPU_WHITELIST)
+    parser.add_argument("--resolution", type=int, default=128, choices=SUPPORTED_RESOLUTIONS)
     parser.add_argument("--a3-steps", type=int, default=30)
     parser.add_argument("--a3-samples", type=int, default=8192)
     parser.add_argument("--a4-steps", type=int, default=200)
@@ -110,6 +115,7 @@ def main():
                 "--manifest", str(args.manifest), "--a1a2-summary", str(args.a1a2_summary),
                 "--a0-audit", str(args.a0_audit), "--vae3d-root", str(args.vae3d_root),
                 "--output-root", str(args.output_root), "--route", route, "--index", str(index),
+                "--resolution", str(args.resolution),
                 "--a3-steps", str(args.a3_steps), "--a3-samples", str(args.a3_samples),
                 "--a4-steps", str(args.a4_steps), "--image-resolution", str(args.image_resolution),
                 "--metric-samples", str(args.metric_samples), "--seed", str(args.seed), "--resume"]

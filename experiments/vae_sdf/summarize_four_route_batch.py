@@ -37,6 +37,8 @@ def main():
             or any(route not in ROUTES for route in routes)):
         raise ValueError("Batch status lists unsupported or duplicate routes")
     rows = []
+    # Roots created before --resolution existed hold their caches under R128.
+    resolution = status["identity"].get("resolution", 128)
     for index, asset in enumerate(assets):
         row = {"index": index, "asset_id": asset["id"], "source_sha256": asset["sha256"],
                "routes": {}}
@@ -45,7 +47,7 @@ def main():
             run = status["runs"].get(f"{index}:{route}", {"status": "pending"})
             entry = {"status": run["status"], "log": run.get("log")}
             if run["status"] == "success":
-                matches = list((args.root / asset["id"] / "R128").glob(f"{route}-*"))
+                matches = list((args.root / asset["id"] / f"R{resolution}").glob(f"{route}-*"))
                 if len(matches) != 1:
                     raise ValueError(f"Expected one cache for {index}:{route}, found {len(matches)}")
                 cache = matches[0]
@@ -72,6 +74,7 @@ def main():
     paired = [row for row in rows if all(row["routes"][route]["status"] == "success"
                                           for route in routes)]
     output = {"schema": "g0_four_route_paired_summary_v1", "root": str(args.root),
+              "resolution": resolution,
               "batch_finished": status.get("finished_at") is not None,
               "total_assets": len(assets), "paired_assets": len(paired),
               "paired_indices": [row["index"] for row in paired],
