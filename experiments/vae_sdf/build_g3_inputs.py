@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import functools
 import hashlib
 import json
 import traceback
@@ -62,6 +63,10 @@ def inspect(item, resolution: int) -> dict:
             "faces": int(len(mesh.faces)),
             "vertices": int(len(mesh.vertices)),
             "normalization_scale": float(scale),
+            # normalized surface area drives the R256 support-cell estimate, so
+            # every candidate can be screened against the capacity budget
+            "area": float(mesh.area),
+            "extent": [float(v) for v in extent],
             "extent_max": float(extent.max()),
             "extent_min": float(extent.min()),
         })
@@ -97,9 +102,11 @@ def main() -> int:
     print(json.dumps({"candidates": len(items), "workers": args.workers}), flush=True)
 
     rows = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for done, row in enumerate(pool.map(lambda item: inspect(item, args.resolution),
-                                            items), 1):
+    # processes, not threads: trimesh's mesh.process() holds the GIL, so a thread
+    # pool runs slower than serial while a process pool is ~4x faster
+    inspect_one = functools.partial(inspect, resolution=args.resolution)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as pool:
+        for done, row in enumerate(pool.map(inspect_one, items), 1):
             rows.append(row)
             if done % 2000 == 0:
                 print(json.dumps({"inspected": done,
@@ -119,6 +126,7 @@ def main() -> int:
         "assets": [{"id": r["id"], "path": r["path"], "sha256": r["sha256"],
                     "category": "unclassified",
                     "faces": r["faces"], "vertices": r["vertices"],
+                    "area": r["area"], "extent": r["extent"],
                     "source_suffix": r["source_suffix"], "converted": r["converted"]}
                    for r in ok],
     }

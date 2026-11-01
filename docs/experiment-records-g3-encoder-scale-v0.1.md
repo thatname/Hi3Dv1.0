@@ -128,15 +128,16 @@
 
 结论：编码器加宽 16 倍几乎不增加时间与显存——每层稀疏卷积的点数按 8× 递减，编码器计算量远小于解码器，逐 block checkpoint 又把激活压住。E3 只到解码器的 47%，若坚持"与解码器同量级"可再做 E4（≈90 M），成本与 E3 同阶。判据仍是：test Chamfer 中位需从 4.7e-4 再降 ≥1.5×，否则说明瓶颈不在编码器容量。
 
-### 3.2 全量清单与分层 split（进行中）
+### 3.2 全量清单与分层 split（已完成，2026-11-01 16:27）
 
-`experiments/vae_sdf/build_g3_inputs.py`：按"每个 asset id 一条记录"合并（fbx/blend/dae 用转换后的 GLB，obj/glb/gltf/stl/ply 用原文件），逐件 sha256 + `load_mesh` 试载，记录面数/顶点/包围盒，退化件（<50 面或零 extent）剔除；随后按**面数 5 分位分层**抽取 train/val/test（每层 80/10/10），输出 `manifest-g3-full.json`、`load-audit-g3-full.json`、`split-g3-full-v1.json` 与 `build-summary.json`。
+`experiments/vae_sdf/build_g3_inputs.py`：按"每个 asset id 一条记录"合并（fbx/blend/dae 用转换后的 GLB，obj/glb/gltf/stl/ply 用原文件），逐件 sha256 + `load_mesh` 试载，记录面数/顶点/包围盒/归一化表面积，退化件（<50 面或零 extent）剔除；随后按**面数 5 分位分层**抽取 train/val/test（每层 80/10/10），输出 `manifest-g3-full.json`、`load-audit-g3-full.json`、`split-g3-full-v1.json` 与 `build-summary.json`。
 
 - 候选 **33,621 件**（obj 5,997 + glb 3,239 + gltf 2,962 + stl 620 + ply 110 + 转换 20,693）。
-- 冒烟（300 件）：296 可用、4 退化，转换件占 68%，面数中位 4,215（P10 346 / P90 52,256）。
-- 正式构建后台运行（48 线程，日志 `logs/manifest-build.log`），耗时主要花在 140 GB 文件的 sha256 与逐件试载。
+- 正式构建结果：**loaded 31,551 / failed 1,561 / degenerate 509**；转换件占 64.5%；面数中位 3,552（P10 292 / P90 49,933）；split = 25,241 / 3,155 / 3,155。
+- 构建耗时 11 分钟（进程池 16 worker）。**原 48 线程版本跑了 40 分钟只完成 ~20%，实测 0.33 s/件**：trimesh 的 `mesh.process(validate=True)` 持有 GIL，线程池比串行（0.098 s/件）还慢；改 `ProcessPoolExecutor` 后 0.025 s/件。
+- 清单每行新增 `area`（归一化表面积）与 `extent`：容量策略需要它，否则要再全量加载一次网格。
 
-### 3.3 训练排法（待用户确认，推荐 A）
+### 3.3 训练排法（已定方案 A，2026-11-01 用户确认）
 
 | 方案 | 安排 | 墙钟 | 归因 |
 |---|---|---|---|
@@ -148,7 +149,11 @@
 
 ### 3.4 开跑前两个阻塞项
 
-1. **cell 数容量策略（必须先做）**：E4 实测 ≈27 kB/cell，2.7M cell 峰值 84.6 GB → 4.4M ≈119 GB、5.0M ≈135 GB 触卡。35k 池的 cell 尾部未测，而现有 100 件池最大已到 4.42M。计划：用清单里的面数与包围盒**预估** R256 cell 数（≈表面积/R²×厚度），冻结"预估 cell ≤ 4.0M 才进训练集"的确定性策略，**两臂同口径**；超限资产进 val/test 或直接排除，并记录在 split 里。
+1. **cell 数容量策略（已冻结并执行，2026-11-01）**：E4 实测 ≈27 kB/cell，2.7M cell 峰值 84.6 GB → 4.4M ≈119 GB、5.0M ≈135 GB 触卡。
+   - **口径（用户 2026-11-01 确认）**：**预估 cell ≤ 4.0M 才进训练集；超出者整件排除（不只在训练集剔除，也不留在 val/test）**，两臂（E4/E0）同口径。
+   - 预估器：`experiments/vae_sdf/estimate_target_capacity.py`，`cells ≈ exp(13.385837) · area^0.795513`（`area` 为 R256 归一化后的网格表面积）。标定集是 g2 100 件 A4 audit 的实测 `grid_quality.cells`（中位 1,029,033、最大 4,421,778）：中位相对误差 15%、P90 33%；在标定集上它判出 4 件超限，与实测的 4 件完全一致。改用面数的单变量模型 P90 误差 114%，不可用。
+   - 执行结果（`manifest/capacity-policy-v1.json`、`manifest/split-g3-full-v2-capacity.json`）：31,551 件中 **排除 512 件（1.62%）**；split 由 25,241/3,155/3,155 变为 **24,818/3,106/3,115**。抽样复核：296 件样本 1.35%、1,500 件样本 1.34% 超限，与全量结果同量级。
+   - 预估分布：中位 0.95M、P90 2.18M、P99 4.68M（尾部极端值 1.7e9 来自面积异常件，已排除）。注意预估值有 33% 的 P90 误差，**4.0M 附近的判定属估计而非实测**；训练侧仍以 A4 实测 cell 为准做最终核对。
 2. **8 卡 E4 冒烟**：E4 只在单卡验证过（2.07 s/步、84.6 GB）。193 M 参数每步 allreduce ≈770 MB，需确认 NCCL 稳定、每 rank 峰值不 OOM、续训正常。计划 200 步冒烟（约 20 分钟）。
 
 ### 3.5 对结构改动建议的评价（2026-11-01，外部审阅意见）
