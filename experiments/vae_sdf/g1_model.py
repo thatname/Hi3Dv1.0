@@ -23,13 +23,25 @@ from sparc3d.structures.point import Point
 from sparc3d.structures.point_modules import PointSequential
 
 
-def encoder_config(backend: str = "spconv") -> SimpleNamespace:
+ENCODER_LADDER = {
+    # Widening only: the latent width stays 32 because the decoder is loaded
+    # strictly from the released Hi3D weights and expects that interface.
+    "E0": SimpleNamespace(widths=(32, 64, 128, 256), blocks_per_level=2),
+    "E1": SimpleNamespace(widths=(64, 128, 256, 512), blocks_per_level=2),
+    "E2": SimpleNamespace(widths=(96, 192, 384, 768), blocks_per_level=3),
+    "E3": SimpleNamespace(widths=(128, 256, 512, 1024), blocks_per_level=2),
+}
+
+
+def encoder_config(backend: str = "spconv", scale: str = "E0") -> SimpleNamespace:
     """Explicit factor-8/latent-32 extension of vae3d T1's encoder contract."""
+    ladder = ENCODER_LADDER[scale]
     return SimpleNamespace(
-        widths=(32, 64, 128, 256), latent_channels=32, factor=8,
-        backend=backend, blocks_per_level=2, attention_shifts=(0, 2),
+        widths=ladder.widths, latent_channels=32, factor=8,
+        backend=backend, blocks_per_level=ladder.blocks_per_level,
+        attention_shifts=(0, 2),
         encoder_kernel_size=3, encoder_dilations=(1,), checkpoint_blocks=True,
-        max_sites=2_000_000, sparsity_mode="full-band", halo=0,
+        max_sites=2_000_000, sparsity_mode="full-band", halo=0, scale=scale,
     )
 
 
@@ -40,9 +52,9 @@ class G1Encoder(nn.Module):
     The G1 full-band support has no requested latent halo or checkpoint reuse.
     """
 
-    def __init__(self):
+    def __init__(self, scale: str = "E0"):
         super().__init__()
-        cfg = encoder_config()
+        cfg = encoder_config(scale=scale)
         self.input = nn.Linear(4, cfg.widths[0])
         self.blocks = nn.ModuleList([
             nn.ModuleList([Residual(c, cfg.backend) for _ in range(cfg.blocks_per_level)])
@@ -186,9 +198,9 @@ class TrainableHi3DDecoder(nn.Module):
 
 
 class G1VAE(nn.Module):
-    def __init__(self, backbone: PTv3MeshDecoder):
+    def __init__(self, backbone: PTv3MeshDecoder, encoder_scale: str = "E0"):
         super().__init__()
-        self.encoder = G1Encoder()
+        self.encoder = G1Encoder(encoder_scale)
         self.decoder = TrainableHi3DDecoder(backbone)
 
     def forward(self, unique_coords, features, fine_cells, resolution: int,

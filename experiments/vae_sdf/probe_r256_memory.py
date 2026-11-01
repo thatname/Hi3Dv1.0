@@ -35,6 +35,8 @@ def main() -> int:
     p.add_argument("--resolution", type=int, default=256)
     p.add_argument("--asset-device", choices=("cuda", "cpu"), default="cpu")
     p.add_argument("--cycles", type=int, default=1)
+    p.add_argument("--encoder-scale", default="E0",
+                   choices=("E0", "E1", "E2", "E3"))
     p.add_argument("--keep-locals", action="store_true",
                    help="Mimic the trainer loop: keep the previous step's tensors bound "
                         "and skip the per-step cache flush")
@@ -50,7 +52,16 @@ def main() -> int:
     manifest = json.loads(manifest_bytes)
     rows = select_target_rows(args.paired_summary, manifest, four_route=True)
     pretrained = load_sparconv_vae(args.weights, device=device)
-    model = G1VAE(pretrained.decoder).to(device).train()
+    model = G1VAE(pretrained.decoder, args.encoder_scale).to(device).train()
+    groups = {
+        "encoder": model.encoder,
+        "decoder": model.decoder,
+    }
+    counts = {name: sum(p.numel() for p in mod.parameters()) / 1e6
+              for name, mod in groups.items()}
+    counts["total"] = sum(p.numel() for p in model.parameters()) / 1e6
+    print(json.dumps({"encoder_scale": args.encoder_scale, "params_M": counts}),
+          flush=True)
     for param in model.decoder.backbone.conv_out.parameters():
         param.requires_grad_(False)
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-4)
@@ -111,6 +122,7 @@ def main() -> int:
             step += 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({"resolution": args.resolution,
+                                       "encoder_scale": args.encoder_scale,
                                        "asset_device": args.asset_device,
                                        "rows": results}, indent=2) + "\n", encoding="utf-8")
     return 0

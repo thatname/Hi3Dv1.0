@@ -106,7 +106,7 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
                             args.asset_device)
               for i in args.indices}
     pretrained = load_sparconv_vae(args.weights, device=device)
-    model = G1VAE(pretrained.decoder).to(device).train()
+    model = G1VAE(pretrained.decoder, args.encoder_scale).to(device).train()
     for param in model.decoder.backbone.conv_out.parameters():
         param.requires_grad_(False)
     # Some steps reach the row-level loss with a head that contributed nothing, so
@@ -122,7 +122,7 @@ def worker(rank: int, world: int, gpus: list[int], args, port: int) -> None:
         state = torch.load(args.resume, map_location=device, weights_only=False)
         old = state["config"]
         expected = {
-            "schema": SCHEMA, "stage": args.stage, "indices": args.indices,
+            "schema": SCHEMA, "stage": args.stage, "encoder_scale": args.encoder_scale, "indices": args.indices,
             "manifest_sha256": manifest_hash, "paired_summary_sha256": summary_hash,
             "pretrained_weights_sha256": sha256(args.weights), "lr": args.lr,
             "surface_weight": args.surface_weight, "surface_sigma": args.surface_sigma,
@@ -290,6 +290,10 @@ def main() -> int:
     p.add_argument("--resolution", type=int, choices=(128, 256), default=128)
     p.add_argument("--asset-device", choices=("cuda", "cpu"), default="cuda",
                    help="Where each rank keeps the cached target tensors between steps")
+    p.add_argument("--encoder-scale", default="E0",
+                   choices=("E0", "E1", "E2", "E3"),
+                   help="Encoder width ladder; the latent width stays 32 so the"
+                        " released decoder weights still load")
     p.add_argument("--stage", choices=("G1", "G2"), default="G2")
     p.add_argument("--resume", type=Path)
     p.add_argument("--seed", type=int, default=20261030)

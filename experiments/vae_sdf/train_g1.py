@@ -188,6 +188,10 @@ def main() -> int:
     p.add_argument("--asset-device", choices=("cuda", "cpu"), default="cuda",
                    help="Where the cached target tensors live between steps; R256 sets "
                         "cannot fit a whole asset set on one card")
+    p.add_argument("--encoder-scale", default="E0",
+                   choices=("E0", "E1", "E2", "E3"),
+                   help="Encoder width ladder; the latent width stays 32 so the"
+                        " released decoder weights still load")
     p.add_argument("--stage", choices=("G1", "G2"), default="G1",
                    help="Experiment stage recorded in the resolved config and checkpoints")
     p.add_argument("--lr", type=float, default=1e-4)
@@ -228,7 +232,7 @@ def main() -> int:
                          args.asset_device)
               for i in args.indices]
     pretrained = load_sparconv_vae(args.weights, device=device)
-    model = G1VAE(pretrained.decoder).to(device).train()
+    model = G1VAE(pretrained.decoder, args.encoder_scale).to(device).train()
     # The released sign/distance head is retained only for exact backbone loading.
     for param in model.decoder.backbone.conv_out.parameters():
         param.requires_grad_(False)
@@ -272,7 +276,7 @@ def main() -> int:
     args.output.mkdir(parents=True)
     report = {
         "schema": training_schema, "status": "running", "beta": 0,
-        "stage": args.stage,
+        "stage": args.stage, "encoder_scale": args.encoder_scale,
         "target_route": ROUTE if four_route else "legacy_a4",
         "teacher_forced_support": True, "indices": args.indices,
         "steps": start_step + args.steps, "additional_steps": args.steps,
