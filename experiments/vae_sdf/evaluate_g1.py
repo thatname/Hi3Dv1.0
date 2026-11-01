@@ -136,7 +136,7 @@ def main() -> int:
         if sha256(source_path) != manifest["assets"][index]["sha256"]:
             raise ValueError(f"Source hash changed at index {index}")
         normalized, center, scale = load_mesh(
-            str(source_path), normalization_extent=(128 - 2) / 128)
+            str(source_path), normalization_extent=(args.resolution - 2) / args.resolution)
         if four_route:
             route_config = json.loads((Path(asset["cache"]).parent / "resolved_config.json").read_text())
             if (not np.allclose(center, route_config["normalization_center"], rtol=0, atol=1e-8)
