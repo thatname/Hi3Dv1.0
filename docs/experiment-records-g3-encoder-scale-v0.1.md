@@ -147,7 +147,8 @@
 
 ## 6. 监控与产物路径
 
-- 训练监控页：`http://127.0.0.1:8770/`（`view_g1 --run /data/hi3d/g3/runs/encoder-scale-r256-v1`；该目录在正式开训前显示 waiting）。
+- **实验独立目录（2026-11-01 起）**：`/data/hi3d/g3/exp-35k-r256-e4-v1/`，内含 `README.md`（实验卡：冻结配置、目录结构、状态、provenance）、`manifest/`（清单/审计/split）、`targets/`（A4 压缩缓存）、`runs/`（训练 run）、`logs/`、`reports/`（探针与汇总）。源网格池、池级转换 GLB（`/data/hi3d/g3/converted/glb-v1/`）与历史 g1/g2 产物均只读引用。
+- 训练监控页：`http://127.0.0.1:8770/`（`view_g1 --run /data/hi3d/g3/exp-35k-r256-e4-v1/runs/train-v1`；开训前显示 waiting）。
 - 审计产物：`/data/hi3d/g3/audit/format-audit-v1.json`。
 - 训练产物目录：`/data/hi3d/g3/runs/<run-id>`（与 `/data/hi3d/g1`、`g2` 独立，互不影响）。
 - 代码：新增 `experiments/vae_sdf/audit_mesh_pool.py`、`experiments/vae_sdf/convert_mesh_pool.py`；`encoder_config(scale=)` 已参数化 E0–E3，训练器与探针均支持 `--encoder-scale`。
