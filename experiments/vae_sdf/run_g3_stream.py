@@ -103,7 +103,7 @@ def main() -> int:
     parser.add_argument("--consumers", type=int, default=10)
     parser.add_argument("--gpus", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7])
     parser.add_argument("--slice-size", type=int, default=100)
-    parser.add_argument("--pending-gb", type=float, default=250.0,
+    parser.add_argument("--pending-gb", type=float, default=400.0,
                         help="pause producing above this much intermediate cache")
     parser.add_argument("--min-free-gb", type=float, default=150.0)
     parser.add_argument("--poll-seconds", type=float, default=10.0)
@@ -124,14 +124,14 @@ def main() -> int:
     todo = [index for index in range(len(assets))
             if not (results_dir / f"{index:02d}.json").is_file()]
     queue_path.write_text(" ".join(str(index) for index in todo), encoding="utf-8")
-    consumer_pending: deque[int] = deque(
-        index for index in range(len(assets))
-        if not a4_present(args.targets_root, assets[index]["id"], args.resolution))
+    outstanding = sum(1 for index in range(len(assets))
+                      if not a4_present(args.targets_root, assets[index]["id"],
+                                        args.resolution))
     asset_mb = mean_asset_mb(args.a1a2_root)
 
     print(json.dumps({"event": "start", "assets": len(assets), "producer_queue": len(todo),
-                      "consumer_pending": len(consumer_pending),
-                      "mean_asset_mb": asset_mb, "pending_gb": args.pending_gb,
+                      "outstanding_targets": outstanding, "mean_asset_mb": asset_mb,
+                      "pending_gb": args.pending_gb,
                       "producers": args.producers, "consumers": args.consumers}), flush=True)
 
     env = dict(os.environ)
@@ -155,6 +155,7 @@ def main() -> int:
 
     producers: dict[int, subprocess.Popen] = {}
     consumers: dict[int, tuple[subprocess.Popen, list[int]]] = {}
+    inflight_indices: set[int] = set()
     serial = {"producer": 0, "consumer": 0}
 
     def start_producer() -> None:
@@ -183,6 +184,7 @@ def main() -> int:
                    "--records", str(args.records / f"stream{number:03d}"),
                    "--physical-gpu", str(gpu), "--resolution", str(args.resolution),
                    "--indices", *[str(i) for i in group]]
+        inflight_indices.update(group)
         consumers[number] = (subprocess.Popen(command, stdout=log,
                                               stderr=subprocess.STDOUT, env=env), group)
 
@@ -208,10 +210,7 @@ def main() -> int:
                 if process.poll() is None:
                     continue
                 del consumers[number]
-                for index in group:
-                    if not a4_present(args.targets_root, assets[index]["id"],
-                                      args.resolution):
-                        consumer_pending.append(index)
+                inflight_indices.difference_update(group)
 
             fields = count_files(results_dir)
             targets = sum(1 for entry in os.scandir(args.targets_root) if entry.is_dir()) \
@@ -225,44 +224,52 @@ def main() -> int:
             elif pause_flag.exists():
                 pause_flag.unlink()
 
-            # A4 takes only fields that already exist; everything else stays queued
-            ready: list[int] = []
-            waiting: list[int] = []
-            while consumer_pending and len(ready) < args.slice_size:
-                index = consumer_pending.popleft()
-                if a4_present(args.targets_root, assets[index]["id"], args.resolution):
-                    continue
-                if (results_dir / f"{index:02d}.json").is_file():
-                    ready.append(index)
-                else:
-                    waiting.append(index)
-                    if len(waiting) >= 4 * args.slice_size:
+            # A4 only ever gets assets whose field already exists; scanning for
+            # them is much cheaper than keeping a queue in sync with the producers
+            if len(consumers) < args.consumers:
+                ready = []
+                for entry in os.scandir(results_dir):
+                    name = entry.name
+                    if not name.endswith(".json"):
+                        continue
+                    index = int(name[:-5])
+                    if index in inflight_indices:
+                        continue
+                    if not a4_present(args.targets_root, assets[index]["id"],
+                                      args.resolution):
+                        ready.append(index)
+                    if len(ready) >= args.slice_size:
                         break
-            consumer_pending.extendleft(reversed(waiting))
-            if ready and len(consumers) < args.consumers:
-                start_consumer(ready)
+                if ready:
+                    start_consumer(ready)
 
-            if not over_budget and len(producers) < args.producers and unclaimed_left() > 0:
-                while len(producers) < args.producers and unclaimed_left() > 0:
+            missing_fields = len(assets) - fields
+            if not over_budget and len(producers) < args.producers and missing_fields > 0:
+                while len(producers) < args.producers and missing_fields > 0:
                     start_producer()
+                    missing_fields = len(assets) - count_files(results_dir)
 
             print(json.dumps({"event": "status", "fields": fields, "targets": targets,
                               "pending": pending, "pending_gb": round(pending_gb, 1),
                               "free_gb": round(disk_free, 1), "paused": over_budget,
                               "producers": len(producers), "consumers": len(consumers),
-                              "consumer_pending": len(consumer_pending)}), flush=True)
+                              "missing_fields": missing_fields}), flush=True)
 
-            no_work = (unclaimed_left() == 0 and not producers
-                       and not consumer_pending and not consumers)
-            if no_work:
-                print(json.dumps({"event": "finished", "fields": fields,
-                                  "targets": targets}), flush=True)
-                return 0
-            if (unclaimed_left() == 0 and not producers and consumer_pending
-                    and not consumers):
-                print(json.dumps({"event": "stalled",
-                                  "consumer_pending": len(consumer_pending)}), flush=True)
-                return 1
+            if not producers and not consumers:
+                # nothing is running: settle whether any work is actually left
+                fields = count_files(results_dir)
+                remaining = sum(1 for index in range(len(assets))
+                                if (results_dir / f"{index:02d}.json").is_file()
+                                and not a4_present(args.targets_root, assets[index]["id"],
+                                                   args.resolution))
+                if len(assets) == fields and remaining == 0:
+                    print(json.dumps({"event": "finished", "fields": fields,
+                                      "targets": targets}), flush=True)
+                    return 0
+                if len(assets) == fields and remaining > 0:
+                    print(json.dumps({"event": "stalled",
+                                      "remaining_targets": remaining}), flush=True)
+                    return 1
             stop.wait(args.poll_seconds)
     except KeyboardInterrupt:
         return 1

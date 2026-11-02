@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1640" height="960" viewBox="0 0 1640 960"
+     font-family="PingFang SC, Hiragino Sans GB, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/>
+    </marker>
+    <style>
+      .lane-cpu { fill:#eef5fb; stroke:#8db6d8; stroke-width:1.5; }
+      .lane-gpu { fill:#f2f8ee; stroke:#8fbf7a; stroke-width:1.5; }
+      .box     { fill:#ffffff; stroke:#3b6f9a; stroke-width:2; rx:10; }
+      .box-gpu { fill:#ffffff; stroke:#4a8a3a; stroke-width:2; rx:10; }
+      .buf     { fill:#fff8e1; stroke:#c9a227; stroke-width:2; rx:10; }
+      .train   { fill:#f3eefb; stroke:#7a5ea8; stroke-width:2; rx:10; }
+      .t-title { font-size:17px; font-weight:600; fill:#1d3f5c; }
+      .t-sub   { font-size:14px; fill:#3d3d3d; }
+      .t-cost  { font-size:13px; fill:#6a6a6a; }
+      .t-lane  { font-size:15px; font-weight:600; fill:#2b2b2b; }
+      .t-note  { font-size:13px; fill:#555; }
+      .flow    { stroke:#555; stroke-width:2; fill:none; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1640" height="960" fill="#ffffff"/>
+  <text x="40" y="46" class="t-title" font-size="22">G3 全量池：A0–A4 阶段与 CPU / GPU 资源分配</text>
+  <text x="40" y="74" class="t-note">快照 2026-11-02 10:10 · 场 7,097 / 31,551 件 · 目标 5,702 / 31,551 件 · 负载 113/128 · 磁盘可用 735 GB</text>
+
+  <!-- CPU lane -->
+  <rect x="40" y="110" width="880" height="230" class="lane-cpu"/>
+  <text x="60" y="140" class="t-lane">CPU 侧 · 128 线程 · 18 个 worker 进程</text>
+  <text x="60" y="164" class="t-note">每个 worker 循环：抢 claim → 建 A1/A2 → 写结果 → 抢下一件</text>
+
+  <rect x="70" y="185" width="220" height="130" class="box"/>
+  <text x="86" y="214" class="t-title">A0 · 网格审计</text>
+  <text x="86" y="240" class="t-sub">闭合性 / 自交 / 符号探针</text>
+  <text x="86" y="264" class="t-sub">已完成，26 件抽检</text>
+  <text x="86" y="292" class="t-cost">一次性，不进生产循环</text>
+
+  <rect x="330" y="185" width="250" height="130" class="box"/>
+  <text x="346" y="214" class="t-title">A1 · 98 向投票定号</text>
+  <text x="346" y="240" class="t-sub">UE50 射线投票 + UDF 定幅值</text>
+  <text x="346" y="264" class="t-sub">R256，16.8M 格点/件</text>
+  <text x="346" y="292" class="t-cost">118 s/件，约 500 核·秒</text>
+
+  <rect x="620" y="185" width="250" height="130" class="box"/>
+  <text x="636" y="214" class="t-title">A2 · 背面壳修正</text>
+  <text x="636" y="240" class="t-sub">τ=0.25，修薄壁/背部错号</text>
+  <text x="636" y="264" class="t-sub">与 A1 同一进程内完成</text>
+  <text x="636" y="292" class="t-cost">不额外增加进程</text>
+
+  <path d="M290 250 L 326 250" class="flow"/>
+  <path d="M580 250 L 616 250" class="flow"/>
+
+  <!-- buffer -->
+  <rect x="330" y="400" width="540" height="130" class="buf"/>
+  <text x="350" y="430" class="t-title">缓冲区 targets/a1a2/</text>
+  <text x="350" y="456" class="t-sub">161 MB/件 · 当前 1,395 件 / 227 GB 待消费</text>
+  <text x="350" y="480" class="t-sub">背压：超过 400 GB 或可用 &lt; 150 GB 就暂停生产</text>
+  <text x="350" y="504" class="t-cost">两个阶段唯一的耦合点（文件系统）</text>
+  <path d="M745 318 L 745 396" class="flow"/>
+
+  <!-- GPU lane -->
+  <rect x="40" y="580" width="880" height="230" class="lane-gpu"/>
+  <text x="60" y="610" class="t-lane">GPU 侧 · 8 × H20（143 GB/卡） · 8–12 个消费者分片</text>
+  <text x="60" y="634" class="t-note">A3 与 A4 在同一个作业内顺序执行，逐件处理</text>
+
+  <rect x="330" y="655" width="250" height="130" class="box-gpu"/>
+  <text x="346" y="684" class="t-title">A3 · 首次可微拟合</text>
+  <text x="346" y="710" class="t-sub">flexicubes_smooth 提取</text>
+  <text x="346" y="734" class="t-sub">32 视角渲染损失，30 步</text>
+  <text x="346" y="762" class="t-cost">A3 网格产物随后删除</text>
+
+  <rect x="620" y="655" width="250" height="130" class="box-gpu"/>
+  <text x="636" y="684" class="t-title">A4 · delta 精修</text>
+  <text x="636" y="710" class="t-sub">±0.5 体素、允许改号，200 步</text>
+  <text x="636" y="734" class="t-sub">产出训练用 target.npz</text>
+  <text x="636" y="762" class="t-cost">整件墙钟 41 s（GPU 段 12.8 s）</text>
+
+  <path d="M600 530 L 600 650" class="flow"/>
+  <path d="M580 720 L 616 720" class="flow"/>
+
+  <!-- targets + training -->
+  <rect x="960" y="655" width="250" height="130" class="box-gpu"/>
+  <text x="976" y="684" class="t-title">targets/a4/</text>
+  <text x="976" y="710" class="t-sub">压缩后 20.8 MB/件</text>
+  <text x="976" y="734" class="t-sub">去 cell_indices，训练集删 ply</text>
+  <text x="976" y="762" class="t-cost">当前 5,702 件</text>
+
+  <rect x="1300" y="620" width="300" height="200" class="train"/>
+  <text x="1318" y="650" class="t-title">训练（尚未启动）</text>
+  <text x="1318" y="678" class="t-sub">G1 VAE · 稀疏编码 → latent 32</text>
+  <text x="1318" y="702" class="t-sub">E4 编码器 98.89 M + 解码器 94.29 M</text>
+  <text x="1318" y="726" class="t-sub">数据 24,818 / 3,106 / 3,115</text>
+  <text x="1318" y="750" class="t-sub">12000 步 × batch 8（8 卡 DDP）</text>
+  <text x="1318" y="782" class="t-cost">8 卡冒烟未做；流式加载已就绪</text>
+
+  <path d="M870 720 L 956 720" class="flow"/>
+  <path d="M1210 720 L 1296 720" class="flow"/>
+
+  <!-- side panel -->
+  <rect x="960" y="110" width="640" height="470" rx="10" fill="#fafafa" stroke="#cccccc"/>
+  <text x="984" y="144" class="t-title">A0–A4 含义</text>
+
+  <text x="984" y="182" class="t-sub"><tspan font-weight="600">A0</tspan>  审计网格是否闭合/自交，给出符号距离探针；决定资产可信度</text>
+  <text x="984" y="226" class="t-sub"><tspan font-weight="600">A1</tspan>  98 个方向各投一条射线，按命中票数判内外，幅值取无符号距离</text>
+  <text x="984" y="270" class="t-sub"><tspan font-weight="600">A2</tspan>  对贴壁/背面区域重投票，修正 A1 在薄结构与背面的错号</text>
+  <text x="984" y="314" class="t-sub"><tspan font-weight="600">A3</tspan>  把 A2 的场变成可微表面，用多视角渲染损失做第一次拟合（30 步）</text>
+  <text x="984" y="358" class="t-sub"><tspan font-weight="600">A4</tspan>  在 A3 上再学一个限幅 delta 场（200 步），贴合原网格，作为训练标签</text>
+
+  <text x="984" y="410" class="t-title">当前吞吐</text>
+  <text x="984" y="444" class="t-sub">场：约 0.21 件/秒（66 件/3 分钟实测）</text>
+  <text x="984" y="470" class="t-sub">目标：约 0.25 件/秒</text>
+  <text x="984" y="496" class="t-sub">剩余：场 24,454 件、目标 25,849 件 → 约 33–35 小时</text>
+  <text x="984" y="528" class="t-cost">瓶颈在 CPU 侧 A1/A2：每件约 500 核·秒，与 A4 共享 128 线程</text>
+  <text x="984" y="554" class="t-cost">A4 每件约 200 核·秒 + 41 s 墙钟，主要成本是加载/指标而非 GPU 拟合</text>
+</svg>
