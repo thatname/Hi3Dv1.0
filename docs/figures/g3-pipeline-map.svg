@@ -23,7 +23,7 @@
 
   <rect width="1640" height="960" fill="#ffffff"/>
   <text x="40" y="46" class="t-title" font-size="22">G3 全量池：A0–A4 阶段与 CPU / GPU 资源分配</text>
-  <text x="40" y="74" class="t-note">快照 2026-11-02 10:10 · 场 7,097 / 31,551 件 · 目标 5,702 / 31,551 件 · 负载 113/128 · 磁盘可用 735 GB</text>
+  <text x="40" y="74" class="t-note">快照 2026-11-02 13:29 · 场 8,272 / 31,551 件 · 目标 7,136 / 31,551 件 · 负载 123/128 · 磁盘可用 748 GB</text>
 
   <!-- CPU lane -->
   <rect x="40" y="110" width="880" height="230" class="lane-cpu"/>
@@ -54,14 +54,14 @@
   <!-- buffer -->
   <rect x="330" y="400" width="540" height="130" class="buf"/>
   <text x="350" y="430" class="t-title">缓冲区 targets/a1a2/</text>
-  <text x="350" y="456" class="t-sub">161 MB/件 · 当前 1,395 件 / 227 GB 待消费</text>
+  <text x="350" y="456" class="t-sub">161 MB/件 · 当前 1,133 件 / 176 GB 待消费</text>
   <text x="350" y="480" class="t-sub">背压：超过 400 GB 或可用 &lt; 150 GB 就暂停生产</text>
   <text x="350" y="504" class="t-cost">两个阶段唯一的耦合点（文件系统）</text>
   <path d="M745 318 L 745 396" class="flow"/>
 
   <!-- GPU lane -->
   <rect x="40" y="580" width="880" height="230" class="lane-gpu"/>
-  <text x="60" y="610" class="t-lane">GPU 侧 · 8 × H20（143 GB/卡） · 8–12 个消费者分片</text>
+  <text x="60" y="610" class="t-lane">GPU 侧 · 8 × H20（143 GB/卡） · 12 个消费者分片</text>
   <text x="60" y="634" class="t-note">A3 与 A4 在同一个作业内顺序执行，逐件处理</text>
 
   <rect x="330" y="655" width="250" height="130" class="box-gpu"/>
@@ -84,7 +84,7 @@
   <text x="976" y="684" class="t-title">targets/a4/</text>
   <text x="976" y="710" class="t-sub">压缩后 20.8 MB/件</text>
   <text x="976" y="734" class="t-sub">去 cell_indices，训练集删 ply</text>
-  <text x="976" y="762" class="t-cost">当前 5,702 件</text>
+  <text x="976" y="762" class="t-cost">当前 7,136 件</text>
 
   <rect x="1300" y="620" width="300" height="200" class="train"/>
   <text x="1318" y="650" class="t-title">训练（尚未启动）</text>
@@ -108,9 +108,9 @@
   <text x="984" y="358" class="t-sub"><tspan font-weight="600">A4</tspan>  在 A3 上再学一个限幅 delta 场（200 步），贴合原网格，作为训练标签</text>
 
   <text x="984" y="410" class="t-title">当前吞吐</text>
-  <text x="984" y="444" class="t-sub">场：约 0.21 件/秒（66 件/3 分钟实测）</text>
-  <text x="984" y="470" class="t-sub">目标：约 0.25 件/秒</text>
-  <text x="984" y="496" class="t-sub">剩余：场 24,454 件、目标 25,849 件 → 约 33–35 小时</text>
+  <text x="984" y="444" class="t-sub">场：0.15 件/秒（135 件/15 分钟实测）</text>
+  <text x="984" y="470" class="t-sub">目标：0.26 件/秒（230 件/15 分钟实测）</text>
+  <text x="984" y="496" class="t-sub">剩余：场 23,279 件、目标 24,415 件 → 约 43 小时（预计 11-04 08:35）</text>
   <text x="984" y="528" class="t-cost">瓶颈在 CPU 侧 A1/A2：每件约 500 核·秒，与 A4 共享 128 线程</text>
-  <text x="984" y="554" class="t-cost">A4 每件约 200 核·秒 + 41 s 墙钟，主要成本是加载/指标而非 GPU 拟合</text>
+  <text x="984" y="554" class="t-cost">A4 每件约 200–240 核·秒 + 41 s 墙钟，GPU 段仅 12.8 s：A4 ETA 26.6 h，GPU 侧产能有富余</text>
 </svg>
