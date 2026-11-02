@@ -107,6 +107,10 @@ def main() -> int:
                         help="pause producing above this much intermediate cache")
     parser.add_argument("--min-free-gb", type=float, default=150.0)
     parser.add_argument("--poll-seconds", type=float, default=10.0)
+    parser.add_argument("--skip-indices", type=int, nargs="*", default=[],
+                        help="Manifest indices deliberately left without an A4 target; a "
+                             "batch has no per-asset timeout, so one pathological asset is "
+                             "otherwise re-offered after every failure and stalls its shard")
     parser.add_argument("--summary-refresh-seconds", type=float, default=60.0)
     args = parser.parse_args()
 
@@ -124,9 +128,11 @@ def main() -> int:
     todo = [index for index in range(len(assets))
             if not (results_dir / f"{index:02d}.json").is_file()]
     queue_path.write_text(" ".join(str(index) for index in todo), encoding="utf-8")
+    skip = {index for index in args.skip_indices if 0 <= index < len(assets)}
     outstanding = sum(1 for index in range(len(assets))
-                      if not a4_present(args.targets_root, assets[index]["id"],
-                                        args.resolution))
+                      if index not in skip
+                      and not a4_present(args.targets_root, assets[index]["id"],
+                                         args.resolution))
     asset_mb = mean_asset_mb(args.a1a2_root)
 
     print(json.dumps({"event": "start", "assets": len(assets), "producer_queue": len(todo),
@@ -233,7 +239,7 @@ def main() -> int:
                     if not name.endswith(".json"):
                         continue
                     index = int(name[:-5])
-                    if index in inflight_indices:
+                    if index in inflight_indices or index in skip:
                         continue
                     if not a4_present(args.targets_root, assets[index]["id"],
                                       args.resolution):
@@ -259,7 +265,8 @@ def main() -> int:
                 # nothing is running: settle whether any work is actually left
                 fields = count_files(results_dir)
                 remaining = sum(1 for index in range(len(assets))
-                                if (results_dir / f"{index:02d}.json").is_file()
+                                if index not in skip
+                                and (results_dir / f"{index:02d}.json").is_file()
                                 and not a4_present(args.targets_root, assets[index]["id"],
                                                    args.resolution))
                 if len(assets) == fields and remaining == 0:
