@@ -82,6 +82,10 @@ def main() -> int:
 
     manifest = json.loads(args.manifest.read_text())
     assets = manifest["assets"]
+    summary = json.loads(args.a1a2_summary.read_text())
+    summary_rows = summary["assets"]
+    if len(summary_rows) != len(assets):
+        raise ValueError("A1/A2 summary and manifest disagree")
     for index in args.indices:
         asset_id = assets[index]["id"]
         record_path = args.records / f"{index:05d}.json"
@@ -89,6 +93,13 @@ def main() -> int:
             if not record_path.is_file():
                 record_path.write_text(json.dumps(
                     {"index": index, "id": asset_id, "status": "skipped_present"}) + "\n")
+            continue
+        if summary_rows[index]["status"] != "success":
+            # decoupled runs keep producing while A4 consumes; an asset whose
+            # initial field is not finished yet is deferred, not failed, and the
+            # caller re-offers it once the producer catches up
+            record_path.write_text(json.dumps(
+                {"index": index, "id": asset_id, "status": "deferred"}) + "\n")
             continue
         log = args.records / f"{index:05d}.log"
         command = [sys.executable, "-m", "experiments.vae_sdf.run_four_route_asset",
