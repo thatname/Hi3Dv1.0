@@ -15,6 +15,88 @@ import time
 from pathlib import Path
 
 
+def sample_utilization(samples: int = 3, interval: float = 4.0) -> dict:
+    """Averaged CPU + GPU utilization sample.
+
+    A single instantaneous reading is misleading here: an A4 shard spends most of
+    an asset's wall time outside the GPU stages, so point samples keep landing in
+    idle gaps. Averaging a few readings over ~10 s once per five minutes gives a
+    number that reflects the run.
+    """
+
+    threads = os.cpu_count() or 1
+    loads = []
+    per_gpu: dict[int, list[int]] = {}
+    memory: dict[int, tuple[int, int]] = {}
+    for attempt in range(max(1, samples)):
+        if attempt:
+            time.sleep(interval)
+        try:
+            loads.append(os.getloadavg()[0])
+        except OSError:
+            pass
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=20, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in out.stdout.strip().splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) != 4:
+                continue
+            try:
+                index, util = int(parts[0]), int(parts[1])
+                memory[index] = (int(parts[2]), int(parts[3]))
+            except ValueError:
+                continue
+            per_gpu.setdefault(index, []).append(util)
+    load1 = sum(loads) / len(loads) if loads else 0.0
+    gpus = [{"index": index, "util": round(sum(values) / len(values)),
+             "memory_used_mb": memory.get(index, (0, 0))[0],
+             "memory_total_mb": memory.get(index, (0, 0))[1]}
+            for index, values in sorted(per_gpu.items())]
+    return {
+        "threads": threads,
+        "load": [round(load1, 1)],
+        "cpu_percent": round(min(100.0, 100.0 * load1 / threads), 1),
+        "gpu": gpus,
+        "gpu_mean_percent": (round(sum(gpu["util"] for gpu in gpus) / len(gpus), 1)
+                             if gpus else None),
+        "sample_count": samples,
+        "sampled_local": time.strftime("%H:%M:%S"),
+    }
+
+
+def utilization(experiment: Path, cache_seconds: float = 300.0) -> dict:
+    """Utilization sampled at most once per `cache_seconds` and shared via a file.
+
+    The viewer polls every few seconds but the numbers only need to be fresh to
+    the requested five minutes, so such sampling stays off the hot path.
+    """
+
+    cache = experiment / "reports" / "utilization-cache.json"
+    now = time.time()
+    try:
+        if cache.is_file() and now - cache.stat().st_mtime < cache_seconds:
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            cached["cache_age_seconds"] = round(now - cache.stat().st_mtime, 1)
+            return cached
+    except (OSError, json.JSONDecodeError):
+        pass
+    payload = sample_utilization()
+    payload["cache_age_seconds"] = 0.0
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        temporary.replace(cache)
+    except OSError:
+        pass
+    return payload
+
+
 def read_json(path: Path, *, optional: bool = False):
     for attempt in range(4):
         try:
@@ -167,6 +249,7 @@ def snapshot(experiment: Path, resolution: int = 256) -> dict:
                  "running": running("experiments.vae_sdf.run_initial_batch")},
         "a4": a4_progress(experiment / "targets" / "a4", resolution),
         "disk": {"targets_bytes": du_bytes(experiment / "targets")},
+        "utilization": utilization(experiment),
     }
     state["a4"]["running"] = running("experiments.vae_sdf.run_g3_a4_batch")
     state["a4"]["target"] = state["manifest"]["assets"]

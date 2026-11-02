@@ -124,7 +124,7 @@ def main() -> int:
                       "resolution": args.resolution,
                       "candidates": len(items), "loaded": len(ok)},
         "assets": [{"id": r["id"], "path": r["path"], "sha256": r["sha256"],
-                    "category": "unclassified",
+                    "category": "unclassified", "bytes": r["bytes"],
                     "faces": r["faces"], "vertices": r["vertices"],
                     "area": r["area"], "extent": r["extent"],
                     "source_suffix": r["source_suffix"], "converted": r["converted"]}

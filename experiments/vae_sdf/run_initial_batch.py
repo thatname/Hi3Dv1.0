@@ -192,8 +192,11 @@ def run(args) -> dict:
             row["traceback"] = traceback.format_exc()
         row["seconds"] = time.perf_counter() - started
         save_json(result_path, row)
-        summary = summarize(assets, args.output_root, plan)
-        save_json(args.output_root / "summary.json", summary)
+        if not args.no_per_asset_summary:
+            # rewriting the whole summary after every asset is O(N^2) in file reads,
+            # which costs hours once the manifest reaches tens of thousands of rows
+            summary = summarize(assets, args.output_root, plan)
+            save_json(args.output_root / "summary.json", summary)
         print(f"{index + 1}/{len(assets)} {row['status']} {asset['id']} {row['seconds']:.1f}s"
               + (f" {row['error']}" if row['status'] == "failed" else ""), flush=True)
     summary = summarize(assets, args.output_root, plan)
@@ -216,6 +219,8 @@ def main() -> int:
     parser.add_argument("--indices", type=int, nargs="+",
                         help="Run only these manifest indices; every other asset stays pending")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--no-per-asset-summary", action="store_true",
+                        help="Skip the in-loop summary rewrite; the caller summarizes instead")
     args = parser.parse_args()
     summary = run(args)
     print(json.dumps(summary["counts"]))

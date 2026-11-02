@@ -64,6 +64,22 @@ function render(s) {
     <tr><th>运行中进程</th><td>${fmt(a4.running)}</td></tr>`, a4.present, a4.target));
   parts.push(stage("磁盘", `
     <tr><th>targets 占用</th><td>${gb(s.disk.targets_bytes)}</td></tr>`));
+  if (s.utilization) {
+    const u = s.utilization;
+    const gpuCells = (u.gpu || []).map(g => {
+      const p = g.util;
+      return `<div style="display:inline-block;width:54px;margin-right:6px">
+        <div style="font-size:11px" class="muted">GPU${g.index}</div>
+        <div class="bar"><i style="width:${p}%;background:${p > 80 ? "#2a7" : p > 40 ? "#ca2" : "#c66"}"></i></div>
+        <div style="font-size:11px" class="muted">${p}%</div></div>`;
+    }).join("");
+    parts.push(stage("利用率（每 5 分钟采样）", `
+      <tr><th>CPU</th><td>负载 ${u.load.join(" / ")}（${u.threads} 线程）
+        · <b>${u.cpu_percent}%</b> · 采样于 ${u.sampled_local}
+        ${u.cache_age_seconds ? "（" + Math.round(u.cache_age_seconds) + " 秒前）" : ""}</td></tr>
+      <tr><th>GPU 平均</th><td><b>${u.gpu_mean_percent === null ? "—" : u.gpu_mean_percent + "%"}</b></td></tr>
+      <tr><th>各卡</th><td>${gpuCells || "—"}</td></tr>`));
+  }
   if (s.rates) {
     const r = s.rates;
     const line = (label, v) => `<tr><th>${label}</th><td>${fmt(v.done)} / ${fmt(v.remaining + v.done)}
