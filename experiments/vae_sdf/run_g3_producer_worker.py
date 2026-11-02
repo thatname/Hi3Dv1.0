@@ -27,9 +27,27 @@ from .prepare_initial_targets import run as prepare_one
 from .run_initial_batch import summarize
 
 
+_RAY_THREADS = int(os.environ.get("VAE3D_RAY_THREADS", "1"))
+
+# Every vendor entry point (ue_sign, ue_carve, signed_grid, watertight, csc_sdf,
+# oriented_sdf) builds its own RaycastingScene with a hardcoded `nthreads=8`, and
+# each scene keeps its pool alive. An asset that walks several of them leaves
+# ~130 threads in the worker, which is enough for one worker to occupy forty
+# cores and starve the other twenty-five. Patching `back_shell.cpu_scene` alone
+# only covered one entry point, so the constructor is patched for the process.
+_Scene = o3d.t.geometry.RaycastingScene
+
+
+def _scene(*args, **kwargs):
+    kwargs["nthreads"] = _RAY_THREADS
+    return _Scene(*args, **kwargs)
+
+
+o3d.t.geometry.RaycastingScene = _scene
+
+
 def _cpu_scene(mesh):
-    scene = o3d.t.geometry.RaycastingScene(
-        nthreads=int(os.environ.get("VAE3D_RAY_THREADS", "1")))
+    scene = o3d.t.geometry.RaycastingScene(nthreads=_RAY_THREADS)
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(
         o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(mesh.vertices),
                                   o3d.utility.Vector3iVector(mesh.faces))))
