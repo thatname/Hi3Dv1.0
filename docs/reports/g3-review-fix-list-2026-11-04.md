@@ -49,15 +49,21 @@ Loss code is duplicated: `train_g1.py:348-375` and `train_g1_ddp.py:212-237`. Th
 - Save and restore a scheduler state in checkpoints (plan line 328 already requires it).
 - AMP (bf16) is optional and must be opt-in (`--amp bf16`, default off). Spconv/PTv3 behaviour under autocast was not checked; it needs a GPU comparison of loss and peak memory before anyone relies on it.
 
-### A3. Shared corners predicted inconsistently
+### A3. Shared corners: training scores per-cell copies, extraction uses merged values
 
-**Problem.** The head predicts 8 corners × 5 channels per cell (`g1_model.py:120-126,196`). A sample point is a corner of up to 8 cells, and each cell predicts it independently. The loss only re-weights duplicates by `1/count` (`train_g1.py:107-109`); nothing makes them agree. Unless extraction averages them, adjacent cells can disagree at the same point and leave cracks.
+**Correction (2026-11-04, after Codex review).** The first version of this item said that independent per-cell corner predictions could leave cracks. That is wrong for the G3 route. `evaluate_g1.py:_raw_mesh` builds a `RouteSurface` (`four_route_a3.py:19-33`) on vae3d's `DynamicSurface`, which works per unique sample point (`base.corners`, `base.indices[:, HI3D_FROM_VAE]`), so FlexiCubes gets one value per shared corner and the mesh is welded. Codex states that `DynamicSurface` averages the copies. That fits the structure, but it was not verified here because vae3d is not in the reviewing checkout. **Confirm the reduction (mean vs. first/last) in `vae3d/render_refine.py` before implementing.**
+
+**Problem (what remains).** The head predicts 8 corners × 5 channels per cell (`g1_model.py:120-126,196`), so a sample point gets up to 8 independent predictions.
+1. Train/eval mismatch: the field/delta loss scores each copy separately (re-weighted by `1/count`, `train_g1.py:107-109`), while extraction uses the merged value. Where copies disagree, the merged sign/magnitude and delta move the zero surface and the vertices to a place no copy was trained to produce. Together with missing support (A4), this shows up as boundary damage or geometric distortion, not as open seams.
+2. Validity is checked on the wrong deltas: `cell_validity` scores each cell's own unmerged deltas, but the extracted geometry uses merged deltas. A cell can pass the validity loss and still be inverted after merging.
 
 **Fix.**
-- Before computing the loss, scatter-mean the per-corner predictions (signed and delta) to unique sample points. The mapping already exists: `hi_indices = indices[:, HI3D_FROM_VAE]`, the per-cell corner → unique-point index built in `load_asset`. Index it with `target_rows`, `torch_scatter` or `index_reduce_(..., "mean")`.
-- Then compute field/delta loss once per unique point against `features[:, 0]` / `features[:, 1:]` (no `1/count` weight needed), and feed the averaged values back per cell into the validity loss.
-- Check `evaluate_g1.py` / the mesh extraction path: if it consumes per-cell corners, make it consume the averaged values too, so training and evaluation match. Read it before changing it; I did not.
+- Merge the per-corner predictions (signed and delta) to unique sample points with **the same reduction the extractor uses** (confirm first; `mean` is expected). The mapping already exists: `hi_indices = indices[:, HI3D_FROM_VAE]`, the per-cell corner → unique-point index built in `load_asset`. Index it with `target_rows`, `torch_scatter` or `index_reduce_(..., "mean")`.
+- Compute field/delta loss once per unique point against `features[:, 0]` / `features[:, 1:]` (no `1/count` weight needed).
+- Gather the merged deltas back per cell and compute the validity loss on those, so it constrains the geometry that is actually extracted.
+- Extraction needs no change if it already merges the same way. Add a [静态检查] test: merged training values == values `DynamicSurface` produces from the same per-cell tensors.
 - Gate behind `--corner-merge {none,mean}` (default `mean` for new runs) so G2 results remain reproducible.
+- Optional, separate experiment: a per-point output head instead of 8 corners per cell. Not requested; only if the merged variant still shows inconsistency.
 
 ### A4. Support (occupancy) head: class imbalance and train/inference mismatch
 
