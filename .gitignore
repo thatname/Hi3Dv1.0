@@ -16,3 +16,7 @@ output*/
 *.safetensors
 *.pt
 *.npz
+
+# Local inspection copies of excluded meshes (see assets/failed/README.md)
+/assets/failed/*
+!/assets/failed/README.md
