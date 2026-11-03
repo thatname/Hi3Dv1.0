@@ -58,16 +58,29 @@ back_shell.cpu_scene = _cpu_scene
 
 
 def claim(claims: Path, index: int, stale_seconds: float) -> bool:
-    """Create the claim file atomically; steal it when the owner looks dead."""
+    """Create the claim file atomically; steal it when the owner looks dead.
+
+    The file records who owns the asset and since when, so a watchdog can defer
+    an asset that has been running far longer than the median instead of letting
+    it hold a worker (and, on a wide mesh, most of the machine) for tens of
+    minutes. A `.defer` sibling marks it as saved for the final pass, so it is
+    not immediately re-claimed after the kill.
+    """
 
     marker = claims / f"{index:05d}.claim"
+    deferred = claims / f"{index:05d}.defer"
+    if deferred.exists():
+        return False
+    payload = json.dumps({"pid": os.getpid(), "started": round(time.time(), 1),
+                          "index": index})
     try:
         os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        marker.write_text(payload, encoding="utf-8")
         return True
     except FileExistsError:
         try:
             if time.time() - marker.stat().st_mtime > stale_seconds:
-                marker.write_text(str(os.getpid()))
+                marker.write_text(payload, encoding="utf-8")
                 return True
         except OSError:
             pass
