@@ -13,7 +13,8 @@
 | `06-a1a2-no-crossing-cells.glb` | A1/A2 | `Initial field has no crossing cells`——退化网格，场里没有零交叉面（14 件） | `/data/hi3d/g3/converted/glb-v1/14e0fa509d10d70aed576c9030cc8a30f99e9010d5fee092614cf06679acf253.glb` |
 | `07-a4-cuda700.glb` | A4 | `RuntimeError: Cuda error: 700` in nvdiffrast `rasterize_fwd_cuda`；2048 分辨率重试仍失败 | `…/objects/086107ffa8ac79ff0390ba968e4196bbbf57d56d4881c429923989ecaf9b8bc7.glb` |
 | `08-a4-normals-not-converged.stl` | A4 | `RuntimeError: GPU corner fan labels did not converge`（`four_route_normals.py:99`） | `…/objects/09bc88b9b06334c8569bfee8cb5c03d5d247e1765df7dbc2332f1aabd9997ebb.stl` |
-| `09-a4-timeout-12.7M-faces.glb` | A4 | 1,268 万面，单独重试 900 s 超时（原始 7,889 万面的 3721 已单独留在 `assets/g3-index-3721/`） | `/data/hi3d/g3/converted/glb-v1/0f7169057a02183e4fe190d4c9dad5fce65ad3dc6e4a59468c31a9029c4b540c.glb` |
+| `09-a4-timeout-12.7M-faces.glb` | A4 | 1,268 万面，单独重试 900 s 超时 | `/data/hi3d/g3/converted/glb-v1/0f7169057a02183e4fe190d4c9dad5fce65ad3dc6e4a59468c31a9029c4b540c.glb` |
+| `10-a4-hang-79M-faces.glb` / `.blend` | A4 | 原始 7,889 万面（转换 GLB 的 sha `d7f71000…` 与 manifest 一致），A4 在 `run_four_route_asset` 里卡死 2 小时 07 分、25 GB RSS、39 GB 显存，日志 15:06 后无输出；已用 `--skip-indices 3721` 手工排除 | `/data/TRELLIS/datasets/ObjaverseXL_github/raw/github/objects/0397b088a449caf8e77f96eb1e98268a9c82c5922ea5599ede1fe0211eeb5c2a.blend`（转换件在 `…/converted/glb-v1/<同 id>.glb`） |
 
 ## 完整漏斗（截至 2026-11-03 14:50，脚本自动生成）
 
