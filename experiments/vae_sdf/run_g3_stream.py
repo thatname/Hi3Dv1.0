@@ -111,6 +111,14 @@ def main() -> int:
                         help="Manifest indices deliberately left without an A4 target; a "
                              "batch has no per-asset timeout, so one pathological asset is "
                              "otherwise re-offered after every failure and stalls its shard")
+    parser.add_argument("--max-a4-failures", type=int, default=2,
+                        help="Stop re-offering an asset to A4 after this many failed "
+                             "attempts; a target that trips a CUDA fault otherwise burns "
+                             "its shard again on every rescan")
+    parser.add_argument("--max-shards-per-gpu", type=int, default=2,
+                        help="Cap how many A4 shards share one card; the round-robin "
+                             "below drifts as shards restart and leaves one card with five "
+                             "while five others idle")
     parser.add_argument("--summary-refresh-seconds", type=float, default=60.0)
     args = parser.parse_args()
 
@@ -128,7 +136,20 @@ def main() -> int:
     todo = [index for index in range(len(assets))
             if not (results_dir / f"{index:02d}.json").is_file()]
     queue_path.write_text(" ".join(str(index) for index in todo), encoding="utf-8")
+    ledger_path = args.targets_root / "skipped-assets.json"
+    failures: dict[int, dict] = {}
+    if ledger_path.is_file():
+        try:
+            for row in json.loads(ledger_path.read_text(encoding="utf-8")):
+                index = row.get("index")
+                if isinstance(index, int) and 0 <= index < len(assets):
+                    failures[index] = {"failures": int(row.get("failures", 0)),
+                                       "error": str(row.get("error", ""))[:200]}
+        except (OSError, ValueError):
+            failures = {}
     skip = {index for index in args.skip_indices if 0 <= index < len(assets)}
+    skip |= {index for index, row in failures.items()
+             if row["failures"] >= args.max_a4_failures}
     outstanding = sum(1 for index in range(len(assets))
                       if index not in skip
                       and not a4_present(args.targets_root, assets[index]["id"],
@@ -180,7 +201,14 @@ def main() -> int:
     def start_consumer(group: list[int]) -> None:
         serial["consumer"] += 1
         number = serial["consumer"]
-        gpu = args.gpus[number % len(args.gpus)]
+        # assign to the least busy card instead of `number % len(gpus)`: the
+        # serial keeps growing across restarts, so the modulo drifts until one
+        # card carries five shards while five cards sit nearly idle
+        counts = {gpu: 0 for gpu in args.gpus}
+        for _, _, busy in consumers.values():
+            counts[busy] = counts.get(busy, 0) + 1
+        wheel = [gpu for gpu in args.gpus if counts[gpu] < args.max_shards_per_gpu]
+        gpu = min(wheel or args.gpus, key=lambda card: (counts.get(card, 0), card))
         log = (args.logs / f"consume-{number:04d}.log").open("a")
         command = [python, "-B", "-m", CONSUMER_MODULE,
                    "--manifest", str(args.manifest), "--a1a2-summary", str(summary_path),
@@ -192,7 +220,38 @@ def main() -> int:
                    "--indices", *[str(i) for i in group]]
         inflight_indices.update(group)
         consumers[number] = (subprocess.Popen(command, stdout=log,
-                                              stderr=subprocess.STDOUT, env=env), group)
+                                              stderr=subprocess.STDOUT, env=env),
+                             group, gpu)
+
+    def record_failures(number: int, group: list[int]) -> None:
+        """Count hard A4 failures and stop re-offering assets that keep failing."""
+
+        records = args.records / f"stream{number:03d}"
+        changed = False
+        for index in group:
+            try:
+                row = json.loads((records / f"{index:05d}.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if row.get("status") != "failed":
+                continue
+            entry = failures.setdefault(index, {"failures": 0, "error": ""})
+            entry["failures"] += 1
+            entry["error"] = (row.get("error") or "")[:200]
+            changed = True
+            if entry["failures"] >= args.max_a4_failures and index not in skip:
+                skip.add(index)
+                print(json.dumps({"event": "skip_failed_asset", "index": index,
+                                  "failures": entry["failures"],
+                                  "error": entry["error"][:120]}), flush=True)
+        if changed:
+            try:
+                write_json(ledger_path, [
+                    {"index": index, "id": assets[index]["id"], **row}
+                    for index, row in sorted(failures.items())
+                    if row["failures"] >= args.max_a4_failures])
+            except OSError:
+                pass
 
     def unclaimed_left() -> int:
         count = 0
@@ -212,11 +271,12 @@ def main() -> int:
             for number, process in list(producers.items()):
                 if process.poll() is not None:
                     del producers[number]
-            for number, (process, group) in list(consumers.items()):
+            for number, (process, group, _gpu) in list(consumers.items()):
                 if process.poll() is None:
                     continue
                 del consumers[number]
                 inflight_indices.difference_update(group)
+                record_failures(number, group)
 
             fields = count_files(results_dir)
             targets = sum(1 for entry in os.scandir(args.targets_root) if entry.is_dir()) \
@@ -292,7 +352,7 @@ def main() -> int:
             pass
         for process in list(producers.values()):
             process.terminate()
-        for process, _ in list(consumers.values()):
+        for process, _, _ in list(consumers.values()):
             process.terminate()
         watcher.join(timeout=30)
         try:
