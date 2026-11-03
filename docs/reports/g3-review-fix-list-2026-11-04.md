@@ -77,7 +77,9 @@ Loss code is duplicated: `train_g1.py:348-375` and `train_g1_ddp.py:212-237`. Th
 
 ### A5. Encoder size E4
 
-**Problem.** E4 (`g1_model.py:34`) is 98.9 M parameters, about the size of the 94.3 M decoder. The encoder's input is the target field itself, so the task is close to identity, and the G2 R256 result was obtained with E0. E4 is a new arm with no evidence yet.
+**Problem.** E4 (`g1_model.py:34`) is 98.9 M parameters, about the size of the 94.3 M decoder, and the G2 R256 result was obtained with E0. E4 is a new arm with no evidence yet.
+
+**Correction (2026-11-04, after Codex review).** The first version called the encoder's task "close to identity". That overstated it. The input is the full 4-channel target `[s, dx, dy, dz]`, so this is field autoencoding with no missing information to infer. But it still passes a 32-channel latent at R/8 and the decoder, so it is real compression, roughly `4·fine_points / (32·latent_sites)`. Both counts are already in the trace (`fine_cells`, `latent_sites`), so report the actual ratio rather than assume it. How much encoder capacity that compression needs is unknown; that is exactly what the E0/E4 comparison has to measure.
 
 **Fix.** No code change beyond keeping `--encoder-scale` explicit. In the run plan, run the E0 arm first (or alongside), and only keep E4 if it beats E0 on the agreed metrics. Say so in HANDOFF. If the user prefers, change the trainers' default back to E0 and require E4 to be passed explicitly.
 
